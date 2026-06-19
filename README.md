@@ -62,10 +62,10 @@ Type `/` in the Telegram message box — **all 27 Command Code commands** are re
 | `/skills [list/add/remove]` | Manage skills | `cmd skills` |
 | `/taste [list/push/pull]` | Manage taste | `cmd taste` |
 | `/status` | Version, auth, session info | `cmd whoami` + `cmd --version` |
-| `/model` | List available AI models | `cmd --list-models` |
+| `/model [name]` | List models or `/model claude-sonnet-4-6` to switch | `cmd --list-models` or `cmd -m <name>` |
 | `/resume` | Continue last session | `cmd -p --continue` |
 | `/clear` | Fresh session (forget context) | drops `--continue` |
-| `/plan <task>` | Plan a task before building | `cmd -p` prompt |
+| `/plan [task]` | Toggle plan mode or `/plan <task>` for one-shot | `cmd -p --plan` |
 | `/review <PR#>` | Review a pull request | `cmd -p` prompt |
 | `/init` | Create AGENTS.md | `cmd -p` prompt |
 | `/cmd <prompt>` | Explicit prompt alias | `cmd -p` prompt |

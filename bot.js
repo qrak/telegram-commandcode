@@ -138,6 +138,16 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
   const maxTurns = Number(process.env.COMMAND_CODE_MAX_TURNS) || 20;
   args.push("--max-turns", String(maxTurns));
 
+  // Model override — if user selected a model via /model
+  if (selectedModel) {
+    args.push("-m", selectedModel);
+  }
+
+  // Plan mode — if user enabled via /plan
+  if (planMode) {
+    args.push("--plan");
+  }
+
   // Session chaining: --continue resumes the most recent headless session
   if (sessionOpts.continue) {
     args.push("--continue");
@@ -219,7 +229,7 @@ const BOT_COMMANDS = [
   { command: "logout",     description: "Remove stored authentication" },        // → cmd logout
   { command: "mcp",        description: "Manage MCP server connections" },       // → cmd mcp
   { command: "memory",     description: "Manage Command Code memory — TUI" },
-  { command: "model",      description: "Show available models" },               // → cmd --list-models
+  { command: "model",      description: "List models or switch: /model <name>" },
   { command: "plan",       description: "Enter plan mode or plan a task" },
   { command: "prcomments", description: "Fetch PR comments — TUI" },            // /pr-comments
   { command: "provider",   description: "Select AI provider — TUI" },
@@ -252,6 +262,11 @@ async function registerCommands() {
 
 // Session tracking
 let sessionActive = false;
+// Model tracking — persists across prompts
+let selectedModel = null; // e.g. "claude-sonnet-4-6" or null (use default)
+// Plan mode tracking
+let planMode = false;
+let oneShotPlan = false; // true when /plan <task> — reset after one prompt
 
 /**
  * Run a CLI subcommand and return its stdout (or error message).
@@ -344,6 +359,14 @@ async function handleCommand(chatId, text) {
         ? "Session: active (use `/resume` to continue, `/clear` to reset)"
         : "Session: none (send a prompt to start)";
 
+      const modelInfo = selectedModel
+        ? "Model: `" + escapeMd(selectedModel) + "` (use `/model` to switch)"
+        : "Model: default (use `/model` to switch)";
+
+      const planInfo = planMode
+        ? "Plan mode: ON (use `/plan` to toggle)"
+        : "Plan mode: off (use `/plan` to toggle)";
+
       const binCode = "`" + escapeMd(CMD_BIN) + "`";
       await sendMessage(
         chatId,
@@ -351,6 +374,8 @@ async function handleCommand(chatId, text) {
         `  Binary: ${binCode}\n` +
         `  Version: ${escapeMd(version || "unknown")}\n` +
         `  Auth: ${escapeMd(whoami || "unknown")}\n` +
+        `  ${modelInfo}\n` +
+        `  ${planInfo}\n` +
         `  ${escapeMd(sessionInfo)}\n` +
         `  YOLO: ${process.env.COMMAND_CODE_YOLO !== "false" ? "on" : "off"}\n` +
         `  Max turns: ${Number(process.env.COMMAND_CODE_MAX_TURNS) || 20}`
@@ -382,18 +407,36 @@ async function handleCommand(chatId, text) {
   // ── /clear ──
   if (ccSlash === "/clear") {
     sessionActive = false;
-    await sendMessage(chatId, "🧹 Session cleared. Next prompt starts fresh.");
+    planMode = false;
+    selectedModel = null;
+    await sendMessage(chatId, "🧹 Session cleared. Model reset to default, plan mode off. Next prompt starts fresh.");
     return true;
   }
 
   // ── /model ──
   if (ccSlash === "/model") {
+    // /model <name> → switch to that model
+    if (args) {
+      selectedModel = args;
+      await sendMessage(chatId, `✅ Switched to model: *${escapeMd(args)}*\n\nNext prompts will use \`-m ${escapeMd(args)}\`.`);
+      return true;
+    }
+
+    // /model (no args) → list available models
     await sendTyping(chatId);
     try {
       const { stdout } = await runCLI(["--list-models"], 15_000);
       const models = stdout || "Run `cmd --list-models` locally";
       const preview = models.length > 3500 ? models.slice(0, 3500) + "\n...(truncated)" : models;
-      await sendMessage(chatId, "🤖 *Available models*\n\n```\n" + escapeMd(preview) + "\n```\n\n_Use `cmd -m <model>` to switch_");
+      const current = selectedModel
+        ? "\n*Currently selected:* `" + escapeMd(selectedModel) + "`\n"
+        : "\n*Using default model.*\n";
+      await sendMessage(
+        chatId,
+        "🤖 *Available models*\n\n```\n" + escapeMd(preview) + "\n```\n" +
+        current +
+        "\n_Use `/model <name>` to switch, e\\.g\\. `/model claude-sonnet-4-6`_"
+      );
     } catch (err) {
       await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
     }
@@ -403,11 +446,18 @@ async function handleCommand(chatId, text) {
   // ── /plan ──
   if (ccSlash === "/plan") {
     if (args) {
-      // /plan <task> → run the task in plan mode
-      return false; // fall through to regular prompt with plan mode
+      // /plan <task> → run the task in plan mode once
+      planMode = true;
+      oneShotPlan = true;
+      return false; // fall through to prompt execution
     }
-    await sendMessage(chatId, "📋 *Plan mode.* Next prompt will run with `--plan`.\n_Send a task to plan it, or use `/plan <task>`._");
-    // TODO: could track plan mode state and pass --plan flag to runCommandCode
+    planMode = !planMode;
+    oneShotPlan = false;
+    const status = planMode ? "ON ✅" : "OFF ❌";
+    await sendMessage(chatId, `📋 Plan mode: *${status}*\n\n` +
+      (planMode
+        ? "Next prompts will run with `--plan`. Use `/plan` again to disable.\n_Or use `/plan <task>` for a one-shot plan._"
+        : "Next prompts will run in normal mode."));
     return true;
   }
 
@@ -534,6 +584,8 @@ async function poll() {
               sessionActive ? { continue: true } : {}
             );
             sessionActive = true;
+            // Reset one-shot plan mode after execution
+            if (oneShotPlan) { planMode = false; oneShotPlan = false; }
             const finalText = result
               ? `✅ *Done:* ${escapeMd(prompt.slice(0, 100))}\n\n${result}`
               : `✅ *Done* \\— ${escapeMd(prompt.slice(0, 100))}`;
@@ -563,6 +615,8 @@ async function poll() {
           sessionActive ? { continue: true } : {}
         );
         sessionActive = true;
+        // Reset one-shot plan mode after execution
+        if (oneShotPlan) { planMode = false; oneShotPlan = false; }
         const finalText = result
           ? `✅ *Done:* ${escapeMd(text.slice(0, 100))}\n\n${result}`
           : `✅ *Done* \\— ${escapeMd(text.slice(0, 100))}`;
