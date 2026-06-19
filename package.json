@@ -1,0 +1,33 @@
+{
+  "name": "telegram-commandcode",
+  "version": "1.0.0",
+  "description": "MCP server for Telegram integration with Command Code — send messages, files, and photos from your coding agent",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "telegram-commandcode": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "commandcode",
+    "mcp",
+    "telegram",
+    "bot",
+    "coding-agent",
+    "command-code"
+  ],
+  "author": "qrak",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qrak/telegram-commandcode"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
