@@ -1,146 +1,186 @@
 # telegram-commandcode
 
-**MCP server for Telegram integration with [Command Code](https://commandcode.ai)** — send messages, photos, and files straight from your AI coding agent.
+**Full Telegram ↔ Command Code bridge** — control your AI coding agent from Telegram and get notifications back.
 
 ```
-> "Run the tests, then send me the results on Telegram"
-  ✅ Tests pass → telegram_send_message → you get notified
+           Telegram
+               ↕
+    ┌──────────┴──────────┐
+    │  bot.js (daemon)    │  Telegram → Command Code
+    │  index.js (MCP)     │  Command Code → Telegram
+    └──────────┬──────────┘
+               ↕
+        command code CLI
 ```
 
-## How It Works
+## Two Modes
 
-This is an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server. Once registered in Command Code, you get these tools:
+| Mode | File | Direction | What it does |
+|---|---|---|---|
+| **MCP Server** | `index.js` | CC → Telegram | Command Code agent sends you messages, files, photos |
+| **Bot Daemon** | `bot.js` | Telegram → CC | You type prompts on Telegram → Command Code executes → result back to Telegram |
+
+---
+
+## Mode 1: Bot Daemon (Telegram → Command Code)
+
+Control Command Code from Telegram like you're sitting at the terminal.
+
+### Setup
+
+```bash
+# 1. Get bot token from @BotFather
+# 2. Start the daemon
+TELEGRAM_BOT_TOKEN=*** \
+TELEGRAM_ALLOWED_USERS=any \
+node bot.js
+```
+
+### Env vars
+
+| Variable | Default | Description |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from @BotFather |
+| `TELEGRAM_ALLOWED_USERS` | `any` | Comma-separated user IDs for access control |
+| `COMMAND_CODE_CMD` | `cmd` | Path to Command Code binary |
+| `COMMAND_CODE_YOLO` | `true` | `false` → read-only mode (no file writes/shell) |
+| `COMMAND_CODE_MAX_TURNS` | `20` | Max conversation turns per prompt |
+
+### Slash Commands
+
+Type `/` in the Telegram message box to see the command menu:
+
+| Command | Action |
+|---|---|
+| `/cmd <prompt>` | Run a task through Command Code |
+| `/status` | Check if `cmd` is available, session info, auth status |
+| `/resume` | Continue the most recent session |
+| `/clear` | Start a fresh session (forget context) |
+| `/model` | List available AI models |
+| `/help` | Show all commands |
+
+### Usage
+
+```
+You (Telegram):  Build a CLI that tells the date, using TypeScript
+Bot:             🚀 Running: `Build a CLI that tells the date...`
+                 ✅ Done: Built date-cli with TypeScript, tsup, vitest...
+
+You:             /resume
+Bot:             🔄 Resuming last headless session...
+                 📋 *Session resumed:* The previous task was building a date CLI...
+
+You:             /clear
+Bot:             🧹 Session cleared. Next prompt starts fresh.
+
+You:             /status
+Bot:             🔧 Command Code Status
+                   Binary: `cmd`
+                   Auth: qrak
+                   Session: active (use /resume, /clear)
+                   YOLO mode: on (all tools)
+                   Max turns: 20
+```
+
+### How it works
+
+1. Daemon polls Telegram via `getUpdates` (long polling, 30s timeout)
+2. Incoming message → `cmd -p "prompt" --yolo --max-turns 20`
+3. `cmd -p` runs headless (non-interactive), outputs response to stdout
+4. Response sent back to Telegram (auto-split for long messages)
+5. Session chaining via `cmd -p --continue` (context preserved between messages)
+6. `/clear` drops `--continue` → fresh session
+
+---
+
+## Mode 2: MCP Server (Command Code → Telegram)
+
+Let your Command Code agent send you notifications while it works.
+
+### Register in Command Code
+
+```bash
+cmd mcp add telegram \
+  -e TELEGRAM_BOT_TOKEN=*** \
+  -e TELEGRAM_DEFAULT_CHAT_ID=1141080547 \
+  -- npx github:qrak/telegram-commandcode
+```
+
+### MCP Tools
 
 | Tool | What it does |
 |---|---|
-| `telegram_send_message` | Send a text message (Markdown or HTML) |
+| `telegram_send_message` | Send a text message (MarkdownV2 or HTML) |
 | `telegram_send_photo` | Send a photo (URL or local file) |
 | `telegram_send_file` | Send any file/document |
 | `telegram_get_updates` | Read recent incoming messages |
 
-## Quickstart
-
-### 1. Create a Telegram Bot
-
-Talk to [@BotFather](https://t.me/BotFather) on Telegram:
-
-```
-/newbot
-→ pick a name and username
-→ copy the token (looks like: 123456:ABCdef...)
-```
-
-### 2. Install & Register in Command Code
-
-```bash
-# Install globally via npm
-npm i -g github:qrak/telegram-commandcode
-
-# Or run directly via npx
-npx github:qrak/telegram-commandcode
-```
-
-Then register it in your project:
-
-```bash
-# One-liner with token
-cmd mcp add telegram \
-  -e TELEGRAM_BOT_TOKEN=123456:ABCdef... \
-  -- npx telegram-commandcode
-
-# Or with a .env file (create .env from .env.example first)
-cmd mcp add telegram \
-  -e TELEGRAM_BOT_TOKEN=123456:ABCdef... \
-  -e TELEGRAM_DEFAULT_CHAT_ID=1141080547 \
-  -- npx telegram-commandcode
-```
-
-### 3. Find your chat ID
-
-Message your bot on Telegram, then ask Command Code:
-
-```
-> Use telegram_get_updates to get recent messages
-```
-
-Or via curl:
-
-```bash
-curl https://api.telegram.org/bot<TOKEN>/getUpdates | jq ".result[0].message.chat.id"
-```
-
-### 4. Use It
-
-Now Command Code automatically discovers the tools. Just ask naturally:
+### Usage
 
 ```
 > Run the build, and if it passes send "✅ Build OK" to Telegram
-```
 
-```
-> Deploy to staging, then telegram_send_message to chat 1141080547
-```
-
-```
-> Write the release notes to /tmp/CHANGELOG.md and send it via telegram_send_file
-```
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | **Yes** | Bot token from @BotFather |
-| `TELEGRAM_DEFAULT_CHAT_ID` | No | Default target chat — if set, you can omit `chat_id` in tool calls |
-
-### Scopes
-
-| Scope | Command |
-|---|---|
-| **Project** (default) | `cmd mcp add telegram -e TOKEN=... -- npx telegram-commandcode` |
-| **Global** (all projects) | `cmd mcp add -s user telegram -e TOKEN=... -- npx telegram-commandcode` |
-| **Shared** (team) | `cmd mcp add -s project telegram -e TOKEN=... -- npx telegram-commandcode` |
-
-## Example Session
-
-```
-> Build the CLI, run the test suite, and send results to my Telegram
-
-  [Command Code builds the project...]
-  [Runs tests: 42 pass, 0 fail]
-
+  [Command Code builds...]
   Using telegram tool: telegram_send_message
-  → ✅ CLI built successfully. Tests: 42 passed, 0 failed.
-
-  You get this on your phone:
-  ┌──────────────────────────┐
-  │ ✅ CLI built successfully │
-  │ Tests: 42 passed, 0 failed │
-  └──────────────────────────┘
+  → You get notified on your phone 📱
 ```
 
-## Manual Testing
+---
 
-You can run the server directly to test:
+## Running Both
+
+Use both modes for full two-way interaction:
 
 ```bash
-# Set token
-export TELEGRAM_BOT_TOKEN=123456:ABCdef...
+# Terminal 1 — Telegram → Command Code daemon
+TELEGRAM_BOT_TOKEN=*** node bot.js
 
-# Send a message (via MCP JSON-RPC over stdio)
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"telegram_send_message","arguments":{"text":"Hello from Command Code!","chat_id":"1141080547"}}}' | node index.js
+# Terminal 2 — Register MCP in your project
+cd my-project
+cmd mcp add telegram -e TELEGRAM_BOT_TOKEN=*** -- node index.js
+cmd  # start interactive session
 ```
+
+Now you can:
+- Send prompts from your phone → executed by `cmd`
+- Agent sends you notifications when done
+- `/resume` to continue sessions from anywhere
+
+---
+
+## Quick Install
+
+```bash
+# Clone
+git clone https://github.com/qrak/telegram-commandcode.git
+cd telegram-commandcode
+npm install
+
+# Bot daemon
+TELEGRAM_BOT_TOKEN=*** node bot.js
+
+# MCP server (for Command Code registration)
+TELEGRAM_BOT_TOKEN=*** node index.js
+```
+
+Or via npx (for MCP mode):
+```bash
+cmd mcp add telegram -e TELEGRAM_BOT_TOKEN=*** -- npx github:qrak/telegram-commandcode
+```
+
+---
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `TELEGRAM_BOT_TOKEN not set` | Token not passed. Check `cmd mcp get telegram` or restart with `-e` flag |
-| `chat_id is required` | Set `TELEGRAM_DEFAULT_CHAT_ID` in .env or pass `chat_id` in every call |
-| Server starts but tools are ✗ | Check `/mcp` menu in Command Code — server should show green |
-| `File not found` | Use absolute paths. For files in your project, use full path like `/home/user/project/report.pdf` |
+| `TELEGRAM_BOT_TOKEN not set` | Export it or create `.env` file from `.env.example` |
+| `cmd: command not found` | Command Code not installed: `npm i -g command-code` |
+| Bot doesn't respond | Check `TELEGRAM_ALLOWED_USERS` — your user ID must be in the list |
+| Session context lost | Use `/resume` (not `/clear`) to keep context between messages |
+| File not found (MCP) | Use absolute paths. For project files: `/home/user/project/file.pdf` |
+| Exit code 3 (auth) | Run `cmd login` on the machine first |
 
 ## License
 
-MIT — use it, fork it, ship it.
+MIT

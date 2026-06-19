@@ -7,6 +7,10 @@
   "bin": {
     "telegram-commandcode": "./index.js"
   },
+  "files": [
+    "index.js",
+    "bot.js"
+  ],
   "scripts": {
     "start": "node index.js"
   },
