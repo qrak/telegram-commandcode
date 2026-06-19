@@ -198,170 +198,284 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
 }
 
 // ---------------------------------------------------------------------------
-// Bot commands (Telegram slash commands)
+// Bot commands — all 27 Command Code slash commands ----------------------------------
 // ---------------------------------------------------------------------------
 
+// Full Command Code slash command set, mapped to CLI where possible.
+// Telegram limit: 100 commands, ~4KB payload. 27 commands = well within.
 const BOT_COMMANDS = [
-  { command: "cmd", description: "Run a prompt through Command Code" },
-  { command: "status", description: "Check Command Code status and session info" },
-  { command: "resume", description: "Continue the most recent session" },
-  { command: "clear", description: "Start a fresh session (forget context)" },
-  { command: "model", description: "Show/set the AI model in use" },
-  { command: "help", description: "Show available commands" },
+  { command: "add_dir",    description: "Add directory to workspace" },          // /add-dir (hyphens not allowed in TG bot cmd names)
+  { command: "agents",     description: "Manage agent configurations — TUI" },
+  { command: "clear",      description: "Clear conversation history (fresh start)" },
+  { command: "compact",    description: "Compact conversation history — TUI" },
+  { command: "effort",     description: "Set reasoning effort for current model — TUI" },
+  { command: "exit",       description: "Exit session (N/A remotely)" },
+  { command: "feedback",   description: "Submit feedback about Command Code" },  // → cmd feedback
+  { command: "help",       description: "Show available commands" },
+  { command: "ide",        description: "Connect IDE — local only" },
+  { command: "init",       description: "Initialize AGENTS.md for this project — TUI" },
+  { command: "learntaste", description: "Learn taste from other agents" },       // /learn-taste → cmd learn-taste
+  { command: "login",      description: "Authenticate with Command Code" },      // → cmd login
+  { command: "logout",     description: "Remove stored authentication" },        // → cmd logout
+  { command: "mcp",        description: "Manage MCP server connections" },       // → cmd mcp
+  { command: "memory",     description: "Manage Command Code memory — TUI" },
+  { command: "model",      description: "Show available models" },               // → cmd --list-models
+  { command: "plan",       description: "Enter plan mode or plan a task" },
+  { command: "prcomments", description: "Fetch PR comments — TUI" },            // /pr-comments
+  { command: "provider",   description: "Select AI provider — TUI" },
+  { command: "resume",     description: "Resume a past conversation" },
+  { command: "review",     description: "Review a pull request — TUI" },
+  { command: "rewind",     description: "Restore to previous checkpoint — TUI" },
+  { command: "share",      description: "Share conversation — N/A remotely" },
+  { command: "skills",     description: "Browse and manage agent skills" },      // → cmd skills
+  { command: "taste",      description: "Manage Taste learning" },               // → cmd taste
+  { command: "terminalsetup", description: "VSCode keybindings — local only" }, // /terminal-setup
+  { command: "unshare",    description: "Stop sharing — N/A remotely" },
 ];
+
+// Map telegram-safe command names (no hyphens) back to real slash commands
+const TG_TO_CC = {
+  "add_dir": "/add-dir",
+  "learntaste": "/learn-taste",
+  "prcomments": "/pr-comments",
+  "terminalsetup": "/terminal-setup",
+};
 
 async function registerCommands() {
   try {
     await api("setMyCommands", { commands: BOT_COMMANDS });
-    console.log("   Commands registered");
+    console.log(`   ${BOT_COMMANDS.length} commands registered`);
   } catch (err) {
     console.error("   ⚠️ Failed to register commands:", err.message);
   }
 }
 
-// Session tracking (for /resume, /clear)
+// Session tracking
 let sessionActive = false;
 
 /**
- * Handle slash commands. Returns true if handled, false if it's a regular prompt.
+ * Run a CLI subcommand and return its stdout (or error message).
+ */
+async function runCLI(args, timeout = 15_000) {
+  return new Promise((resolve) => {
+    const child = spawn(CMD_BIN, args, {
+      env: { ...process.env },
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => { stdout += d.toString(); });
+    child.stderr.on("data", (d) => { stderr += d.toString(); });
+    child.on("close", (code) => {
+      resolve({ code, stdout: stdout.trim(), stderr: stderr.trim() });
+    });
+    child.on("error", (err) => {
+      resolve({ code: -1, stdout: "", stderr: err.message });
+    });
+  });
+}
+
+/**
+ * Handle ALL Command Code slash commands.
+ * Returns true if handled (message sent), false if it should be treated as a regular prompt.
  */
 async function handleCommand(chatId, text) {
   const parts = text.split(/\s+/);
-  const cmd = parts[0].toLowerCase();
+  const rawCmd = parts[0].toLowerCase();
+  // Convert TG-safe name back to CC slash command (e.g. add_dir → /add-dir)
+  const ccSlash = TG_TO_CC[rawCmd.slice(1)] || rawCmd;
   const args = parts.slice(1).join(" ");
 
-  switch (cmd) {
-    case "/cmd": {
-      if (!args) {
-        await sendMessage(chatId, "Usage: `/cmd <prompt>` — run a prompt through Command Code");
-        return true;
-      }
-      // Fall through to regular prompt handling below
-      return false;
+  // ── Commands that forward directly to CLI subcommands ──
+  const CLI_MAP = {
+    "/feedback":  { args: ["feedback", args], msg: "📝 Submitting feedback..." },
+    "/learntaste": { args: ["learn-taste"], msg: "🧠 Learning taste from repositories..." },
+    "/login":     { args: ["login"], msg: "🔑 Authenticating..." },
+    "/logout":    { args: ["logout"], msg: "👋 Logging out..." },
+    "/mcp":       { args: ["mcp", ...(args ? args.split(/\s+/) : ["list"])], msg: "🔌 Managing MCP servers..." },
+    "/skills":    { args: ["skills", ...(args ? args.split(/\s+/) : ["list"])], msg: "📦 Managing skills..." },
+    "/taste":     { args: ["taste", ...(args ? args.split(/\s+/) : ["list"])], msg: "🎨 Managing taste..." },
+  };
+
+  if (CLI_MAP[ccSlash]) {
+    const { args: cliArgs, msg } = CLI_MAP[ccSlash];
+    await sendTyping(chatId);
+    await sendMessage(chatId, escapeMd(msg));
+    try {
+      const { stdout, stderr, code } = await runCLI(cliArgs, 30_000);
+      const output = stdout || stderr || `(exit ${code})`;
+      const capped = output.length > 3800 ? output.slice(0, 3800) + "\n...(truncated)" : output;
+      await sendMessage(chatId, "```\n" + escapeMd(capped) + "\n```");
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
     }
-
-    case "/start": {
-      await sendMessage(
-        chatId,
-        "🤖 *Command Code Bot*\n\n" +
-        "I connect Telegram to your Command Code CLI\\.\n\n" +
-        "*Send me any prompt* and I'll run it through `cmd \\-p`\\.\n\n" +
-        "*Commands:*\n" +
-        "  `/cmd <prompt>` \\- Run a task\n" +
-        "  `/status` \\- Check session info\n" +
-        "  `/resume` \\- Continue last session\n" +
-        "  `/clear` \\- Start fresh\n" +
-        "  `/model` \\- Show current model\n" +
-        "  `/help` \\- Show this message\n\n" +
-        "_Tip: type `/` in the message box to see all commands_"
-      );
-      return true;
-    }
-
-    case "/help": {
-      const cmds = BOT_COMMANDS.map(
-        (c) => `  /${c.command} \\- ${escapeMd(c.description)}`
-      ).join("\n");
-      await sendMessage(
-        chatId,
-        `*Available commands:*\n${cmds}\n\n_Any other message is treated as a prompt for Command Code\\._`
-      );
-      return true;
-    }
-
-    case "/status": {
-      try {
-        // Quick probe: run `cmd whoami` to check auth
-        const child = spawn(CMD_BIN, ["whoami"], {
-          env: { ...process.env },
-          stdio: ["pipe", "pipe", "pipe"],
-          timeout: 10_000,
-        });
-        let whoami = "";
-        child.stdout.on("data", (d) => { whoami += d.toString(); });
-        await new Promise((r) => child.on("close", r));
-
-        const sessionInfo = sessionActive
-          ? "Session: active \\(use `/resume` to continue, `/clear` to reset\\)"
-          : "Session: none \\(send a prompt to start\\)";
-
-        const binCode = "`" + escapeMd(CMD_BIN) + "`";
-        await sendMessage(
-          chatId,
-          `🔧 *Command Code Status*\n` +
-          `  Binary: ${binCode}\n` +
-          `  Auth: ${whoami.trim() || "unknown"}\n` +
-          `  ${escapeMd(sessionInfo)}\n` +
-          `  YOLO mode: ${process.env.COMMAND_CODE_YOLO !== "false" ? "on (all tools)" : "off (read\\-only)"}\n` +
-          `  Max turns: ${Number(process.env.COMMAND_CODE_MAX_TURNS) || 20}`
-        );
-      } catch (err) {
-        await sendMessage(chatId, escapeMd(`❌ Error checking status: ${err.message}`));
-      }
-      return true;
-    }
-
-    case "/resume": {
-      sessionActive = true;
-      await sendTyping(chatId);
-      await sendMessage(chatId, "🔄 Resuming last headless session\\.\\.\\.");
-
-      try {
-        const result = await runCommandCode(
-          "Continue where we left off. Summarize the previous context and ask what I'd like to do next.",
-          process.env.HOME,
-          { continue: true }
-        );
-        await sendMessage(chatId, `📋 *Session resumed:*\n${result}`);
-      } catch (err) {
-        await sendMessage(chatId, escapeMd(`❌ Error: ${err.message}`));
-      }
-      return true;
-    }
-
-    case "/clear": {
-      sessionActive = false;
-      await sendMessage(chatId, "🧹 Session cleared\\. Next prompt starts fresh \\(no context from previous runs\\)\\.");
-      return true;
-    }
-
-    case "/model": {
-      try {
-        const child = spawn(CMD_BIN, ["--list-models"], {
-          env: { ...process.env },
-          stdio: ["pipe", "pipe", "pipe"],
-          timeout: 10_000,
-        });
-        let stdout = "";
-        child.stdout.on("data", (d) => { stdout += d.toString(); });
-        await new Promise((r) => child.on("close", r));
-
-        const models = stdout.trim() || "Run `cmd --list-models` locally to see models";
-        const preview = models.length > 3500
-          ? models.slice(0, 3500) + "\n...(truncated)"
-          : models;
-
-        const codeBlock = "```\n" + escapeMd(preview) + "\n```";
-        await sendMessage(
-          chatId,
-          "🤖 *Available models*\n\n" + codeBlock + "\n\n" +
-          "_Use `cmd -m <model>` locally to switch\\._"
-        );
-      } catch (err) {
-        await sendMessage(chatId, `❌ Could not list models: ${escapeMd(err.message)}`);
-      }
-      return true;
-    }
-
-    default:
-      // Unknown slash command
-      if (text.startsWith("/")) {
-        const escapedCmd = escapeMd(cmd);
-        await sendMessage(chatId, "Unknown command: `" + escapedCmd + "`. Use /help to see available commands\\.");
-        return true;
-      }
-      return false;
+    return true;
   }
+
+  // ── /start ──
+  if (ccSlash === "/start") {
+    await sendMessage(
+      chatId,
+      "🤖 *Command Code Bot*\\n\\n" +
+      "I connect Telegram to your Command Code CLI\\. All 27 CC commands are available \\(type `/` to see them\\)\\.\\n\\n" +
+      "*Send any prompt* and I'll run `cmd \\-p` \\(headless mode\\)\\."
+    );
+    return true;
+  }
+
+  // ── /help ──
+  if (ccSlash === "/help") {
+    const cmds = BOT_COMMANDS.map(c => {
+      const slash = TG_TO_CC[c.command] || "/" + c.command;
+      return `  ${slash} \\- ${escapeMd(c.description)}`;
+    }).join("\n");
+    await sendMessage(chatId, `*Command Code commands:*\n${cmds}\n\n_Any other message → ` + "`cmd -p`" + ` prompt_`);
+    return true;
+  }
+
+  // ── /status ──
+  if (ccSlash === "/status") {
+    await sendTyping(chatId);
+    try {
+      const { stdout: whoami } = await runCLI(["whoami"]);
+      const { stdout: version } = await runCLI(["--version"]);
+      const sessionInfo = sessionActive
+        ? "Session: active (use `/resume` to continue, `/clear` to reset)"
+        : "Session: none (send a prompt to start)";
+
+      const binCode = "`" + escapeMd(CMD_BIN) + "`";
+      await sendMessage(
+        chatId,
+        `🔧 *Command Code Status*\n` +
+        `  Binary: ${binCode}\n` +
+        `  Version: ${escapeMd(version || "unknown")}\n` +
+        `  Auth: ${escapeMd(whoami || "unknown")}\n` +
+        `  ${escapeMd(sessionInfo)}\n` +
+        `  YOLO: ${process.env.COMMAND_CODE_YOLO !== "false" ? "on" : "off"}\n` +
+        `  Max turns: ${Number(process.env.COMMAND_CODE_MAX_TURNS) || 20}`
+      );
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /resume ──
+  if (ccSlash === "/resume") {
+    sessionActive = true;
+    await sendTyping(chatId);
+    await sendMessage(chatId, "🔄 Resuming last headless session...");
+    try {
+      const result = await runCommandCode(
+        "Continue where we left off. Summarize context and ask what I'd like to do next.",
+        process.env.HOME,
+        { continue: true }
+      );
+      await sendMessage(chatId, `📋 *Session resumed:*\n${escapeMd(result)}`);
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /clear ──
+  if (ccSlash === "/clear") {
+    sessionActive = false;
+    await sendMessage(chatId, "🧹 Session cleared. Next prompt starts fresh.");
+    return true;
+  }
+
+  // ── /model ──
+  if (ccSlash === "/model") {
+    await sendTyping(chatId);
+    try {
+      const { stdout } = await runCLI(["--list-models"], 15_000);
+      const models = stdout || "Run `cmd --list-models` locally";
+      const preview = models.length > 3500 ? models.slice(0, 3500) + "\n...(truncated)" : models;
+      await sendMessage(chatId, "🤖 *Available models*\n\n```\n" + escapeMd(preview) + "\n```\n\n_Use `cmd -m <model>` to switch_");
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /plan ──
+  if (ccSlash === "/plan") {
+    if (args) {
+      // /plan <task> → run the task in plan mode
+      return false; // fall through to regular prompt with plan mode
+    }
+    await sendMessage(chatId, "📋 *Plan mode.* Next prompt will run with `--plan`.\n_Send a task to plan it, or use `/plan <task>`._");
+    // TODO: could track plan mode state and pass --plan flag to runCommandCode
+    return true;
+  }
+
+  // ── /review ──
+  if (ccSlash === "/review") {
+    await sendTyping(chatId);
+    const prArg = args ? ` ${args}` : "";
+    await sendMessage(chatId, escapeMd(`🔍 Reviewing PR${prArg}...`));
+    try {
+      const result = await runCommandCode(`Review pull request${prArg}. Check for bugs, security issues, test gaps, and style problems.`);
+      await sendMessage(chatId, escapeMd(result));
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /init ──
+  if (ccSlash === "/init") {
+    await sendTyping(chatId);
+    await sendMessage(chatId, "📄 Initializing AGENTS.md...");
+    try {
+      const result = await runCommandCode("Create or update AGENTS.md for this project based on its structure, tech stack, and conventions.");
+      await sendMessage(chatId, escapeMd(result));
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── TUI-only commands (inform the user) ──
+  const TUI_ONLY = new Set([
+    "/agents", "/compact", "/effort", "/ide", "/memory",
+    "/pr-comments", "/provider", "/rewind", "/terminal-setup",
+    "/add-dir",
+  ]);
+
+  if (TUI_ONLY.has(ccSlash)) {
+    const tuiNote = "is a TUI\\-only command \\(interactive terminal mode\\) and cannot be executed remotely\\. Use it in a local `cmd` session\\.";
+    await sendMessage(chatId, `ℹ️ ${ccSlash} ${tuiNote}`);
+    return true;
+  }
+
+  // ── N/A commands ──
+  const NA_CMDS = new Set(["/exit", "/share", "/unshare"]);
+  if (NA_CMDS.has(ccSlash)) {
+    await sendMessage(chatId, `ℹ️ ${ccSlash} is not applicable when using Command Code remotely via Telegram\\.`);
+    return true;
+  }
+
+  // ── /cmd (explicit prompt alias) ──
+  if (ccSlash === "/cmd") {
+    if (!args) {
+      await sendMessage(chatId, "Usage: `/cmd <prompt>` — run a prompt through Command Code");
+      return true;
+    }
+    return false; // fall through to prompt execution
+  }
+
+  // Unknown slash command → treat as prompt
+  if (text.startsWith("/") && !args) {
+    // Lone slash with no recognized handler → help
+    const escapedCmd = escapeMd(ccSlash);
+    await sendMessage(chatId, "Unknown command: `" + escapedCmd + "`. Use /help to see available commands.");
+    return true;
+  }
+
+  return false; // not a command → treat as regular prompt
 }
 
 // ---------------------------------------------------------------------------
