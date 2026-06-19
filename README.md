@@ -48,16 +48,37 @@ node bot.js
 
 ### Slash Commands
 
-Type `/` in the Telegram message box to see the command menu:
+Type `/` in the Telegram message box — **all 27 Command Code commands** are registered:
 
-| Command | Action |
-|---|---|
-| `/cmd <prompt>` | Run a task through Command Code |
-| `/status` | Check if `cmd` is available, session info, auth status |
-| `/resume` | Continue the most recent session |
-| `/clear` | Start a fresh session (forget context) |
-| `/model` | List available AI models |
-| `/help` | Show all commands |
+**🟢 CLI-mapped (run directly)**
+
+| Command | Action | Maps to |
+|---|---|---|
+| `/feedback <msg>` | Submit feedback | `cmd feedback` |
+| `/learntaste` | Learn taste from other agents | `cmd learn-taste` |
+| `/login` | Authenticate | `cmd login` |
+| `/logout` | Remove auth | `cmd logout` |
+| `/mcp [list/add/remove]` | Manage MCP servers | `cmd mcp` |
+| `/skills [list/add/remove]` | Manage skills | `cmd skills` |
+| `/taste [list/push/pull]` | Manage taste | `cmd taste` |
+| `/status` | Version, auth, session info | `cmd whoami` + `cmd --version` |
+| `/model` | List available AI models | `cmd --list-models` |
+| `/resume` | Continue last session | `cmd -p --continue` |
+| `/clear` | Fresh session (forget context) | drops `--continue` |
+| `/plan <task>` | Plan a task before building | `cmd -p` prompt |
+| `/review <PR#>` | Review a pull request | `cmd -p` prompt |
+| `/init` | Create AGENTS.md | `cmd -p` prompt |
+| `/cmd <prompt>` | Explicit prompt alias | `cmd -p` prompt |
+
+**ℹ️ TUI-only (informational)**
+
+`/agents` · `/compact` · `/effort` · `/ide` · `/memory` · `/pr-comments` · `/provider` · `/rewind` · `/terminal-setup` · `/add-dir`
+
+Bot politely explains these require interactive TUI mode.
+
+**⛔ N/A remotely**
+
+`/exit` · `/share` · `/unshare`
 
 ### Usage
 
