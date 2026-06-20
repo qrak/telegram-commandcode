@@ -6,15 +6,18 @@
   "type": "module",
   "bin": {
     "telegram-commandcode": "./index.js",
-    "telegram-commandcode-bot": "./bot.js"
+    "telegram-commandcode-bot": "./bot.js",
+    "telegram-commandcode-discord": "./discord.js"
   },
   "files": [
     "index.js",
-    "bot.js"
+    "bot.js",
+    "discord.js"
   ],
   "scripts": {
     "start": "node index.js",
-    "start:bot": "node bot.js"
+    "start:bot": "node bot.js",
+    "start:discord": "node discord.js"
   },
   "keywords": [
     "commandcode",
@@ -31,7 +34,8 @@
     "url": "https://github.com/qrak/telegram-commandcode"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "discord.js": "^14.26.4"
   },
   "engines": {
     "node": ">=18"

@@ -444,7 +444,11 @@ const BOT_COMMANDS = [
   { command: "rewind",     description: "Restore to previous checkpoint — TUI" },
   { command: "share",      description: "Share conversation — N/A remotely" },
   { command: "skills",     description: "Browse and manage agent skills" },      // → cmd skills
-  { command: "steer",      description: "Give mid-session steer: /steer <instruction>" },
+  { command: "steer",      description: "Give mid-session guidance: /steer <instruction>" },
+  { command: "stop",       description: "Stop the running agent" },
+  { command: "retry",      description: "Re-run the last prompt" },
+  { command: "whoami",     description: "Show your user info" },
+  { command: "background", description: "Run a task in background: /background <prompt>" },
   { command: "taste",      description: "Manage Taste learning" },               // → cmd taste
   { command: "terminalsetup", description: "VSCode keybindings — local only" }, // /terminal-setup
   { command: "unshare",    description: "Stop sharing — N/A remotely" },
@@ -472,7 +476,7 @@ const sessions = new Map();
 
 function getSession(chatId) {
   if (!sessions.has(chatId)) {
-    sessions.set(chatId, { active: false, model: null, planMode: false, oneShotPlan: false, steer: null });
+    sessions.set(chatId, { active: false, model: null, planMode: false, oneShotPlan: false, steer: null, lastPrompt: null });
   }
   return sessions.get(chatId);
 }
@@ -491,7 +495,12 @@ function enqueueMessage(chatId, userMsgId, statusMsgId, prompt) {
   if (!messageQueues.has(chatId)) {
     messageQueues.set(chatId, []);
   }
-  messageQueues.get(chatId).push({ chatId, userMsgId, statusMsgId, prompt });
+
+  // If user has a running process, mark the new prompt with interrupt prefix
+  const hasRunning = getRunningProcess(chatId) !== null;
+  const finalPrompt = hasRunning ? `⚡ Previous execution interrupted.\n\n${prompt}` : prompt;
+
+  messageQueues.get(chatId).push({ chatId, userMsgId, statusMsgId, prompt: finalPrompt });
   // Acknowledge immediately
   setReaction(chatId, userMsgId, "⏳").catch(() => {});
   processQueue(chatId);
@@ -743,6 +752,84 @@ async function handleCommand(chatId, text) {
     return true;
   }
 
+  // ── /stop — kill running process ──
+  if (ccSlash === "/stop") {
+    const child = getRunningProcess(chatId);
+    if (child && !child.killed) {
+      killRunningProcess(chatId);
+      await sendMessage(chatId, "🛑 Execution stopped by user\\.");
+    } else {
+      await sendMessage(chatId, "🤷 No active execution to stop\\.");
+    }
+    return true;
+  }
+
+  // ── /retry — re-run last prompt ──
+  if (ccSlash === "/retry") {
+    const state = getSession(chatId);
+    if (!state.lastPrompt) {
+      await sendMessage(chatId, "🤷 No previous prompt to retry\\. Send a message first\\.");
+      return true;
+    }
+    return false; // fall through to prompt execution with lastPrompt
+  }
+
+  // ── /whoami — show user info ──
+  if (ccSlash === "/whoami") {
+    await sendMessage(
+      chatId,
+      `*User info*\n` +
+      `  ID: \`${escapeMd(userId?.toString() || "unknown")}\`\n` +
+      `  Username: @${escapeMd(username)}\n` +
+      `  Access: ${ALLOWED.includes("any") ? "unrestricted" : "restricted"}\n` +
+      `  Platform: Telegram\n` +
+      `  Chat type: ${escapeMd(chatType)}\n` +
+      `  PID: ${getRunningProcess(chatId) ? "active" : "idle"}`
+    );
+    return true;
+  }
+
+  // ── /background <prompt> — run in background, notify when done ──
+  if (ccSlash === "/background") {
+    if (!args) {
+      await sendMessage(chatId, "Usage: `/background <prompt>` — run a task in the background\\.\n\nYou'll be notified here when it completes\\.");
+      return true;
+    }
+    const state = getSession(chatId);
+    const bgId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await sendMessage(chatId, `🔄 Background task started: "${escapeMd(args.slice(0, 100))}"\nTask ID: \`${bgId}\``);
+
+    // Spawn background cmd process (detached)
+    const cmdArgs = ["-p", args, "--skip-onboarding"];
+    if (process.env.COMMAND_CODE_YOLO !== "false") cmdArgs.push("--yolo");
+    const maxTurns = Number(process.env.COMMAND_CODE_MAX_TURNS) || 20;
+    cmdArgs.push("--max-turns", String(maxTurns));
+    if (state.model) cmdArgs.push("-m", state.model);
+    if (state.planMode) cmdArgs.push("--plan");
+
+    const child = spawn(CMD_BIN, cmdArgs, {
+      cwd: process.env.HOME,
+      env: { ...process.env },
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 30 * 60 * 1000, // 30 min timeout for background tasks
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => { stdout += d.toString(); });
+    child.stderr.on("data", (d) => { stderr += d.toString(); });
+    child.on("close", (code) => {
+      const output = stdout.trim() || stderr.trim() || `(exit ${code})`;
+      const escaped = escapeMd(output.slice(0, 3800));
+      const status = code === 0 ? "✅" : "⚠️";
+      sendMessage(chatId, `${status} *Background task complete* \\(${bgId}\\)\n\n${escaped}`).catch(() => {});
+    });
+    child.on("error", (err) => {
+      sendMessage(chatId, `❌ *Background task failed* \\(${bgId}\\): ${escapeMd(err.message)}`).catch(() => {});
+    });
+    return true;
+  }
+
   // ── /review ──
   if (ccSlash === "/review") {
     await sendTyping(chatId);
@@ -847,6 +934,9 @@ async function processPrompt(chatId, userMsgId, statusMsgId, prompt, state) {
   await setReaction(chatId, userMsgId, "👀");
 
   try {
+    // Store prompt for /retry
+    state.lastPrompt = prompt;
+
     // Progress step 1: thinking
     await editMessage(chatId, statusMsgId, `🤔 *Processing:* ${escapeMd(prompt.slice(0, 100))}...`);
 
@@ -1021,6 +1111,22 @@ async function poll() {
       if (text.startsWith("/")) {
         const handled = await handleCommand(chatId, text);
         if (handled) continue;
+
+        // /retry — re-run last prompt
+        if (text.trim() === "/retry" || text.startsWith("/retry ")) {
+          const state = getSession(chatId);
+          const prompt = text.includes(" ") ? text.slice(7).trim() : state.lastPrompt;
+          if (!prompt) {
+            await sendMessage(chatId, "🤷 No previous prompt to retry\\.");
+            continue;
+          }
+          const initialMsg = await sendMessage(chatId, `🔄 Retrying: \`${escapeMd(prompt.slice(0, 200))}\``);
+          const statusMsgId = initialMsg?.message_id || initialMsg?.result?.message_id;
+          if (statusMsgId && msg.message_id) {
+            enqueueMessage(chatId, msg.message_id, statusMsgId, prompt);
+          }
+          continue;
+        }
 
         // /cmd with args — treat as prompt
         if (text.startsWith("/cmd ")) {
