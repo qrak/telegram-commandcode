@@ -16,7 +16,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -51,6 +51,61 @@ loadEnv();
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
+
+const CC_CONFIG_PATH = resolve(process.env.HOME || "/home/qrak", ".commandcode", "config.json");
+
+function readCCConfig() {
+  try {
+    return JSON.parse(readFileSync(CC_CONFIG_PATH, "utf8"));
+  } catch { return {}; }
+}
+
+function writeCCConfig(config) {
+  mkdirSync(resolve(CC_CONFIG_PATH, ".."), { recursive: true });
+  writeFileSync(CC_CONFIG_PATH, JSON.stringify(config, null, 2));
+}
+
+const PROJECTS_DIR = resolve(process.env.HOME || "/home/qrak", ".commandcode", "projects", "home-qrak");
+
+/**
+ * Read the most recent session from Command Code's project storage.
+ * Extracts the last user+assistant exchange as plain text context for /resume.
+ */
+function readLatestSession() {
+  try {
+    const files = readdirSync(PROJECTS_DIR).filter(f => f.endsWith(".jsonl") && !f.includes(".checkpoints."));
+    if (files.length === 0) return null;
+    // Sort by mtime descending, pick the latest non-checkpoint session
+    files.sort((a, b) => statSync(resolve(PROJECTS_DIR, b)).mtimeMs - statSync(resolve(PROJECTS_DIR, a)).mtimeMs);
+    const latest = resolve(PROJECTS_DIR, files[0]);
+    const lines = readFileSync(latest, "utf8").split("\n").filter(Boolean);
+    if (lines.length < 2) return null;
+
+    // Walk backwards to find the last complete user→assistant turn
+    let lastUser = null, lastAssistant = null;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        const role = entry.role;
+        const text = entry.content?.find(c => c?.type === "text")?.text || "";
+        if (!text) continue;
+        if (role === "assistant" && !lastAssistant) {
+          lastAssistant = text;
+        } else if (role === "user" && lastAssistant && !lastUser) {
+          lastUser = text;
+          break;
+        }
+      } catch { continue; }
+    }
+    if (!lastUser && !lastAssistant) return null;
+
+    let ctx = "--- Last Command Code session ---\n";
+    if (lastUser) ctx += `[User]: ${lastUser.slice(0, 3000)}\n`;
+    if (lastAssistant) ctx += `[Assistant]: ${lastAssistant.slice(0, 3000)}\n`;
+    ctx += "--- End of session ---\n";
+    return ctx;
+  } catch { return null; }
+}
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -339,6 +394,13 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
     args.push("--plan");
   }
 
+  // Added directories — /add-dir support
+  if (sessionOpts.addDirs && sessionOpts.addDirs.length > 0) {
+    for (const dir of sessionOpts.addDirs) {
+      args.push("--add-dir", dir);
+    }
+  }
+
   // Session chaining: --continue resumes the most recent headless session
   if (sessionOpts.continue) {
     args.push("--continue");
@@ -420,43 +482,59 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
 // Full Command Code slash command set, mapped to CLI where possible.
 // Telegram limit: 100 commands, ~4KB payload. 27 commands = well within.
 const BOT_COMMANDS = [
-  { command: "add_dir",    description: "Add directory to workspace" },          // /add-dir (hyphens not allowed in TG bot cmd names)
-  { command: "agents",     description: "Manage agent configurations — TUI" },
+  { command: "add_dir",    description: "Add directory to workspace: /add-dir <path>" },
+  { command: "agents",     description: "Show agent configuration info" },
+  { command: "background", description: "Run a task in background: /background <prompt>" },
   { command: "clear",      description: "Clear conversation history (fresh start)" },
-  { command: "compact",    description: "Compact conversation history — TUI" },
-  { command: "effort",     description: "Set reasoning effort for current model — TUI" },
+  { command: "compact",    description: "Compact conversation history" },
+  { command: "compactmode", description: "Select compact mode: /compact-mode <mode>" },
+  { command: "configuremodels", description: "Choose model per task: /configure-models" },
+  { command: "context",    description: "Show context window usage" },
+  { command: "courses",    description: "Open Command Code courses in browser" },
+  { command: "effort",     description: "Set reasoning effort: /effort <low|medium|high|max>" },
   { command: "exit",       description: "Exit session (N/A remotely)" },
-  { command: "feedback",   description: "Submit feedback about Command Code" },  // → cmd feedback
+  { command: "feedback",   description: "Submit feedback about Command Code" },
+  { command: "fork",       description: "Fork conversation into new session" },
+  { command: "goal",       description: "Set objective: /goal <text|clear|status>" },
   { command: "help",       description: "Show available commands" },
   { command: "ide",        description: "Connect IDE — local only" },
-  { command: "init",       description: "Initialize AGENTS.md for this project — TUI" },
-  { command: "learntaste", description: "Learn taste from other agents" },       // /learn-taste → cmd learn-taste
-  { command: "login",      description: "Authenticate with Command Code" },      // → cmd login
-  { command: "logout",     description: "Remove stored authentication" },        // → cmd logout
-  { command: "mcp",        description: "Manage MCP server connections" },       // → cmd mcp
-  { command: "memory",     description: "Manage Command Code memory — TUI" },
+  { command: "info",       description: "Show system information" },
+  { command: "init",       description: "Initialize AGENTS.md for this project" },
+  { command: "learntaste", description: "Learn taste from other agents" },
+  { command: "login",      description: "Authenticate with Command Code" },
+  { command: "logout",     description: "Remove stored authentication" },
+  { command: "mcp",        description: "Manage MCP server connections" },
+  { command: "memory",     description: "Manage memory: /memory or /memory <instruction>" },
   { command: "model",      description: "List models or switch: /model <name>" },
   { command: "plan",       description: "Enter plan mode or plan a task" },
-  { command: "prcomments", description: "Fetch PR comments — TUI" },            // /pr-comments
-  { command: "provider",   description: "Select AI provider — TUI" },
+  { command: "prcomments", description: "Fetch PR comments for current branch" },
+  { command: "provider",   description: "Set AI provider: /provider <name>" },
+  { command: "queue",      description: "Queue prompt for next turn: /queue <prompt>" },
+  { command: "reload",     description: "Restart bot and resume session" },
+  { command: "rename",     description: "Rename current session: /rename <name>" },
   { command: "resume",     description: "Resume a past conversation" },
-  { command: "review",     description: "Review a pull request — TUI" },
-  { command: "rewind",     description: "Restore to previous checkpoint — TUI" },
+  { command: "review",     description: "Review a pull request: /review or /review <pr>" },
+  { command: "rewind",     description: "Restore to previous checkpoint (TUI only)" },
   { command: "share",      description: "Share conversation — N/A remotely" },
-  { command: "skills",     description: "Browse and manage agent skills" },      // → cmd skills
+  { command: "skills",     description: "Browse and manage agent skills" },
+  { command: "status",     description: "Show environment status (model, session, config)" },
   { command: "steer",      description: "Give mid-session guidance: /steer <instruction>" },
   { command: "stop",       description: "Stop the running agent" },
-  { command: "retry",      description: "Re-run the last prompt" },
-  { command: "whoami",     description: "Show your user info" },
-  { command: "background", description: "Run a task in background: /background <prompt>" },
-  { command: "taste",      description: "Manage Taste learning" },               // → cmd taste
-  { command: "terminalsetup", description: "VSCode keybindings — local only" }, // /terminal-setup
+  { command: "taste",      description: "Manage Taste learning" },
+  { command: "terminalsetup", description: "VSCode keybindings — local only" },
+  { command: "undo",       description: "Back up N turns and re-prompt: /undo [N]" },
   { command: "unshare",    description: "Stop sharing — N/A remotely" },
+  { command: "update",     description: "Update Command Code to latest version" },
+  { command: "usage",      description: "Show credits, plan, and usage metrics" },
+  { command: "version",    description: "Show Command Code version" },
+  { command: "whoami",     description: "Show your user info" },
 ];
 
 // Map telegram-safe command names (no hyphens) back to real slash commands
 const TG_TO_CC = {
   "add_dir": "/add-dir",
+  "compactmode": "/compact-mode",
+  "configuremodels": "/configure-models",
   "learntaste": "/learn-taste",
   "prcomments": "/pr-comments",
   "terminalsetup": "/terminal-setup",
@@ -476,7 +554,8 @@ const sessions = new Map();
 
 function getSession(chatId) {
   if (!sessions.has(chatId)) {
-    sessions.set(chatId, { active: false, model: null, planMode: false, oneShotPlan: false, steer: null, lastPrompt: null });
+    const persistedModel = readCCConfig().model || null;
+    sessions.set(chatId, { active: false, model: persistedModel, planMode: false, oneShotPlan: false, steer: null, goal: null, lastPrompt: null, addDirs: [], queuedPrompts: [], sessionName: null });
   }
   return sessions.get(chatId);
 }
@@ -512,9 +591,9 @@ async function processQueue(chatId) {
 
   try {
     while (messageQueues.get(chatId)?.length > 0) {
-      const { chatId, userMsgId, statusMsgId, prompt } = messageQueues.get(chatId).shift();
-      const state = getSession(chatId);
-      await processPrompt(chatId, userMsgId, statusMsgId, prompt, state);
+      const { chatId: qChatId, userMsgId, statusMsgId, prompt } = messageQueues.get(chatId).shift();
+      const state = getSession(qChatId);
+      await processPrompt(qChatId, userMsgId, statusMsgId, prompt, state);
     }
   } catch (err) {
     console.error(`[queue] Error processing for ${chatId}:`, err.message);
@@ -573,7 +652,8 @@ async function runCLI(args, timeout = 15_000) {
  * Handle ALL Command Code slash commands.
  * Returns true if handled (message sent), false if it should be treated as a regular prompt.
  */
-async function handleCommand(chatId, text) {
+async function handleCommand(chatId, text, userInfo = {}) {
+  const { userId, username, chatType } = userInfo;
   const parts = text.split(/\s+/);
   const rawCmd = parts[0].toLowerCase();
   // Convert TG-safe name back to CC slash command (e.g. add_dir → /add-dir)
@@ -611,8 +691,17 @@ async function handleCommand(chatId, text) {
     await sendMessage(
       chatId,
       "🤖 *Command Code Bot*\n\n" +
-      "I connect Telegram to your Command Code CLI\\. All 27 CC commands are available \\(type `/` to see them\\)\\.\n\n" +
-      "*Send any prompt* and I'll run `cmd \\-p` \\(headless mode\\)\\."
+      "I connect Telegram to your Command Code CLI\\. All CC commands are available \\(type `/` to see them\\)\\.\n\n" +
+      "*Send any prompt* and I'll run `cmd \\-p` \\(headless mode\\)\\.\n\n" +
+      "_Key commands:_\n" +
+      "  `/goal <text>` \\- set a standing objective\n" +
+      "  `/steer <text>` \\- mid\\-session guidance\n" +
+      "  `/model <name>` \\- switch model\n" +
+      "  `/effort <level>` \\- set reasoning effort\n" +
+      "  `/background <p>` \\- run in background\n" +
+      "  `/queue <p>` \\- queue for next turn\n" +
+      "  `/status` \\- show environment\n" +
+      "  `/resume` \\- resume last session"
     );
     return true;
   }
@@ -653,6 +742,10 @@ async function handleCommand(chatId, text) {
         ? "Steer: " + escapeMd(state.steer.slice(0, 60)) + (state.steer.length > 60 ? "…" : "")
         : "No steer set";
 
+      const goalInfo = state.goal
+        ? "Goal: " + escapeMd(state.goal.slice(0, 60)) + (state.goal.length > 60 ? "…" : "")
+        : "No goal set";
+
       await sendMessage(
         chatId,
         `╔══ *Command Code* ══\n` +
@@ -661,8 +754,9 @@ async function handleCommand(chatId, text) {
         `╟ Auth: ${escapeMd(whoami || "not logged in")}\n` +
         `╟ ${escapeMd(sessionInfo)}\n` +
         `╟ Plan: ${planInfo} · YOLO: ${process.env.COMMAND_CODE_YOLO !== "false" ? "on" : "off"} · Turns: ${Number(process.env.COMMAND_CODE_MAX_TURNS) || 20}\n` +
+        `╟ ${goalInfo}\n` +
         `╟ ${steerInfo}\n` +
-        `╚══ Use \`/model\` to switch, \`/steer <msg>\` to guide, \`/clear\` to reset`
+        `╚══ Use \`/model\` to switch, \`/goal\` to set objective, \`/steer\` to guide, \`/clear\` to reset`
       );
     } catch (err) {
       await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
@@ -670,17 +764,22 @@ async function handleCommand(chatId, text) {
     return true;
   }
 
-  // ── /resume ──
+  // ── /resume — resumes with actual session context from CC storage ──
   if (ccSlash === "/resume") {
     const state = getSession(chatId);
     state.active = true;
     await sendTyping(chatId);
     await sendMessage(chatId, "🔄 Resuming last headless session...");
     try {
+      // Read the last conversation turn from Command Code's session storage
+      const sessionCtx = readLatestSession();
+      const prompt = sessionCtx
+        ? `Continue the previous session. Here's the last exchange:\n\n${sessionCtx}\n\nSummarize what we were working on based on that context, and ask what I'd like to do next. If you can't determine the context, ask me to explain.`
+        : "Continue where we left off. I don't have previous session context — ask me what we were working on.";
       const result = await runCommandCode(
-        "Continue where we left off. Summarize context and ask what I'd like to do next.",
+        prompt,
         process.env.HOME,
-        { continue: true, model: state.model, planMode: state.planMode }
+        { continue: true, model: state.model, planMode: state.planMode, addDirs: state.addDirs }
       );
       await sendMessage(chatId, `📋 *Session resumed:*\n${escapeMd(result)}`);
     } catch (err) {
@@ -689,10 +788,10 @@ async function handleCommand(chatId, text) {
     return true;
   }
 
-  // ── /clear ──
-  if (ccSlash === "/clear") {
+  // ── /clear and /new ──
+  if (ccSlash === "/clear" || ccSlash === "/new") {
     resetSession(chatId);
-    await sendMessage(chatId, "🧹 Session cleared. Model reset to default, plan mode off. Next prompt starts fresh.");
+    await sendMessage(chatId, "🧹 Session cleared. Model reset to default, plan mode off, goal/steer cleared. Next prompt starts fresh.");
     return true;
   }
 
@@ -702,6 +801,12 @@ async function handleCommand(chatId, text) {
     // /model <name> → switch to that model
     if (args) {
       state.model = args;
+      // Persist model selection so it survives bot restarts
+      try {
+        const cfg = readCCConfig();
+        cfg.model = args;
+        writeCCConfig(cfg);
+      } catch {}
       await sendMessage(chatId, `✅ Switched to model: *${escapeMd(args)}*\n\nNext prompts will use \`-m ${escapeMd(args)}\`.`);
       return true;
     }
@@ -806,6 +911,11 @@ async function handleCommand(chatId, text) {
     cmdArgs.push("--max-turns", String(maxTurns));
     if (state.model) cmdArgs.push("-m", state.model);
     if (state.planMode) cmdArgs.push("--plan");
+    if (state.addDirs.length > 0) {
+      for (const dir of state.addDirs) {
+        cmdArgs.push("--add-dir", dir);
+      }
+    }
 
     const child = spawn(CMD_BIN, cmdArgs, {
       cwd: process.env.HOME,
@@ -836,7 +946,8 @@ async function handleCommand(chatId, text) {
     const prArg = args ? ` ${args}` : "";
     await sendMessage(chatId, escapeMd(`🔍 Reviewing PR${prArg}...`));
     try {
-      const result = await runCommandCode(`Review pull request${prArg}. Check for bugs, security issues, test gaps, and style problems.`);
+      const state = getSession(chatId);
+      const result = await runCommandCode(`Review pull request${prArg}. Check for bugs, security issues, test gaps, and style problems.`, process.env.HOME, { model: state.model, planMode: state.planMode, chatId, addDirs: state.addDirs });
       await sendMessage(chatId, escapeMd(result));
     } catch (err) {
       await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
@@ -866,12 +977,85 @@ async function handleCommand(chatId, text) {
     return true;
   }
 
-  // ── /init ──
-  if (ccSlash === "/init") {
+  // ── /effort <level> or /effort (show current) — also /reasoning, /reason ──
+  if (ccSlash === "/effort" || ccSlash === "/reasoning" || ccSlash === "/reason") {
+    const validLevels = ["low", "medium", "high", "xhigh", "max"];
+    const cfg = readCCConfig();
+    const currentModel = cfg.model || "default";
+    const currentEffort = cfg.reasoningEffort?.[currentModel];
+
+    if (!args) {
+      if (currentEffort) {
+        await sendMessage(chatId, `🧠 Current effort for \`${escapeMd(currentModel)}\`: *${escapeMd(currentEffort)}*\n\nValid levels: ${validLevels.map(l => "`" + l + "`").join(", ")}\n\nUse \`/effort <level>\` to change it.`);
+      } else {
+        await sendMessage(chatId, `🧠 No effort set for \`${escapeMd(currentModel)}\` (uses model default).\n\nValid levels: ${validLevels.map(l => "`" + l + "`").join(", ")}\n\nUse \`/effort <level>\` to set it.`);
+      }
+      return true;
+    }
+
+    const level = args.toLowerCase();
+    if (!validLevels.includes(level)) {
+      await sendMessage(chatId, `❌ Invalid effort level. Valid: ${validLevels.map(l => "`" + l + "`").join(", ")}`);
+      return true;
+    }
+
+    cfg.reasoningEffort = cfg.reasoningEffort || {};
+    cfg.reasoningEffort[currentModel] = level;
+    writeCCConfig(cfg);
+    await sendMessage(chatId, `✅ Effort set to *${escapeMd(level)}* for \`${escapeMd(currentModel)}\`.\n\nNext prompts use reasoning effort: ${escapeMd(level)}.`);
+    return true;
+  }
+
+  // ── /provider <name> or /provider (show current) ──
+  if (ccSlash === "/provider") {
+    const cfg = readCCConfig();
+    const current = cfg.provider || "command-code";
+
+    if (!args) {
+      await sendMessage(chatId, `🔌 Current provider: *${escapeMd(current)}*\n\nUse \`/provider <name>\` to switch.\n_(Note: only locally installed providers are available.)_`);
+      return true;
+    }
+
+    cfg.provider = args;
+    writeCCConfig(cfg);
+    await sendMessage(chatId, `✅ Provider switched to *${escapeMd(args)}*.\n\nNext sessions will use \`${escapeMd(args)}\` as the provider.`);
+    return true;
+  }
+
+  // ── /add-dir <path> or /add-dir (list) ──
+  if (ccSlash === "/add-dir") {
+    const state = getSession(chatId);
+    if (!args) {
+      if (state.addDirs.length === 0) {
+        await sendMessage(chatId, "📂 No directories added yet.\n\nUse `/add-dir <path>` to add a directory to the workspace context.\nUse `/add-dir clear` to remove all.");
+      } else {
+        const dirs = state.addDirs.map((d, i) => `  ${i + 1}\\. \`${escapeMd(d)}\``).join("\n");
+        await sendMessage(chatId, `📂 *Added directories:*\n${dirs}\n\nUse \`/add-dir clear\` to remove all, or add more with \`/add-dir <path>\`.`);
+      }
+      return true;
+    }
+    if (args.toLowerCase() === "clear") {
+      state.addDirs = [];
+      await sendMessage(chatId, "📂 All added directories cleared.");
+      return true;
+    }
+    state.addDirs.push(args);
+    await sendMessage(chatId, `📂 Added directory: \`${escapeMd(args)}\`\nTotal: ${state.addDirs.length}\\. Use \`/add-dir clear\` to remove all.`);
+    return true;
+  }
+
+  // ── /pr-comments (inject gh commands as a prompt) ──
+  if (ccSlash === "/pr-comments") {
+    const prArg = args ? ` #${args}` : "";
     await sendTyping(chatId);
-    await sendMessage(chatId, "📄 Initializing AGENTS.md...");
+    await sendMessage(chatId, escapeMd(`🔍 Fetching PR comments${prArg}...`));
     try {
-      const result = await runCommandCode("Create or update AGENTS.md for this project based on its structure, tech stack, and conventions.");
+      const state = getSession(chatId);
+      const result = await runCommandCode(
+        `Fetch and display all comments from the current GitHub pull request${prArg}. First run \`gh pr view --json number,headRepository,title\` to identify the PR, then fetch the comments and show them with author, timestamp, and content.`,
+        process.env.HOME,
+        { model: state.model, planMode: false, chatId, addDirs: state.addDirs }
+      );
       await sendMessage(chatId, escapeMd(result));
     } catch (err) {
       await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
@@ -879,11 +1063,338 @@ async function handleCommand(chatId, text) {
     return true;
   }
 
+  // ── /compact — in headless mode, there's no persistent session to compact ──
+  if (ccSlash === "/compact") {
+    await sendMessage(chatId, "ℹ️ In headless mode \\(`cmd \\-p`\\) there's no persistent conversation to compact — each prompt starts fresh\\.\n\nUse `/clear` to reset your session state \\(model, plan mode, steer\\), or just send a new prompt\\.");
+    return true;
+  }
+
+  // ── /memory (show current AGENTS.md or manage via prompt) ──
+  if (ccSlash === "/memory") {
+    if (args) {
+      // /memory <prompt> — pass as a prompt to manage memory
+      const state = getSession(chatId);
+      await sendTyping(chatId);
+      await sendMessage(chatId, escapeMd(`🧠 Managing memory: ${args.slice(0, 100)}...`));
+      try {
+        const result = await runCommandCode(
+          `Manage Command Code memory. ${args}\n\nRead AGENTS.md files if needed and make requested changes.`,
+          process.env.HOME,
+          { model: state.model, planMode: false, chatId, addDirs: state.addDirs }
+        );
+        await sendMessage(chatId, escapeMd(result));
+      } catch (err) {
+        await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+      }
+    } else {
+      // Show current memory files
+      const paths = [
+        "/etc/.commandcode/AGENTS.md",
+        resolve(process.env.HOME, ".commandcode/AGENTS.md"),
+        resolve(process.cwd(), "AGENTS.md"),
+        resolve(process.cwd(), ".commandcode/AGENTS.md"),
+      ];
+      const found = paths.filter(p => existsSync(p));
+      if (found.length > 0) {
+        const listing = found.map(p => "  \\- `" + escapeMd(p) + "`").join("\n");
+        await sendMessage(chatId, `🧠 *Memory files found:*\n${listing}\n\nUse \`/memory <instruction>\` to modify memory, e\\.g\\. \`/memory add a note about project conventions\`\\.\n\nThe interactive TUI \\(/memory with no args\\) is not available remotely\\.`);
+      } else {
+        await sendMessage(chatId, "🧠 No memory files found\\. Use `/memory <instruction>` to create one, e\\.g\\. `/memory set up project conventions for this repo`\\.");
+      }
+    }
+    return true;
+  }
+
+  // ── /agents (show agent info, acknowledge TUI limitation) ──
+  if (ccSlash === "/agents") {
+    const agentsDir = resolve(process.env.HOME, ".commandcode/agents");
+    const dirExists = existsSync(agentsDir);
+    if (dirExists) {
+      await sendMessage(chatId, `🤖 Agent configs stored at \`${escapeMd(agentsDir)}\`\\.\n\nInteractive agent management \\(TUI\\) is not available remotely\\. Describe what you want and I can help set it up via prompt\\.`);
+    } else {
+      await sendMessage(chatId, "🤖 No agent configurations found\\.\n\nInteractive agent management \\(TUI\\) is not available remotely\\. Describe what you want and I can help set it up via prompt\\.");
+    }
+    return true;
+  }
+
+  // ── /rewind (TUI-only — requires session state) ──
+  if (ccSlash === "/rewind") {
+    await sendMessage(chatId, "ℹ️ /rewind requires an active TUI session and cannot be used remotely\\.\n\nTo revert changes, describe what you need reverted and I can help\\. Or use `git checkout` commands directly\\.");
+    return true;
+  }
+
+  // ── /init ──
+  if (ccSlash === "/init") {
+    const state = getSession(chatId);
+    await sendTyping(chatId);
+    await sendMessage(chatId, "📄 Initializing AGENTS.md...");
+    try {
+      const result = await runCommandCode("Create or update AGENTS.md for this project based on its structure, tech stack, and conventions.", process.env.HOME, { model: state.model, planMode: state.planMode, chatId, addDirs: state.addDirs });
+      await sendMessage(chatId, escapeMd(result));
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /goal — set a standing objective that's prepended to every prompt ──
+  if (ccSlash === "/goal") {
+    const state = getSession(chatId);
+    if (!args) {
+      if (state.goal) {
+        await sendMessage(chatId, `🎯 *Current goal:*\n\n${escapeMd(state.goal)}\n\n_Use \`/goal clear\` to remove, \`/goal <text>\` to update._`);
+      } else {
+        await sendMessage(chatId, "🎯 *No goal set.*\n\nUse `/goal <text>` to set a standing objective the agent works towards across turns.\nUse `/goal clear` to remove it.\nUse `/goal status` to check it.");
+      }
+      return true;
+    }
+    if (args.toLowerCase() === "clear") {
+      state.goal = null;
+      await sendMessage(chatId, "🎯 Goal cleared.");
+      return true;
+    }
+    if (args.toLowerCase() === "status") {
+      await sendMessage(chatId, state.goal ? `🎯 *Goal:* ${escapeMd(state.goal)}` : "🎯 *No goal set.*");
+      return true;
+    }
+    state.goal = args;
+    await sendMessage(chatId, `🎯 Goal set:\n\n${escapeMd(args)}\n\n_This will be prepended to all subsequent prompts until cleared._`);
+    return true;
+  }
+
+  // ── /queue — queue a prompt for the next turn without interrupting ──
+  if (ccSlash === "/queue") {
+    if (!args) {
+      const state = getSession(chatId);
+      if (state.queuedPrompts.length === 0) {
+        await sendMessage(chatId, "📋 Queue is empty. Use `/queue <prompt>` to queue a prompt for the next turn.");
+      } else {
+        const items = state.queuedPrompts.map((p, i) => `  ${i + 1}\\. ${escapeMd(p.slice(0, 80))}`).join("\n");
+        await sendMessage(chatId, `📋 *Queued prompts:*\n${items}`);
+      }
+      return true;
+    }
+    const state = getSession(chatId);
+    state.queuedPrompts.push(args);
+    await sendMessage(chatId, `📋 Queued prompt (${state.queuedPrompts.length} total). It will run after the current task completes.`);
+    return true;
+  }
+
+  // ── /undo — back up N turns (in headless mode, re-run with context) ──
+  if (ccSlash === "/undo") {
+    const state = getSession(chatId);
+    const n = parseInt(args) || 1;
+    if (!state.lastPrompt) {
+      await sendMessage(chatId, "🤷 No previous prompt to undo.");
+      return true;
+    }
+    await sendMessage(chatId, `↩️ Undoing last ${n} turn(s). Re-running with adjusted context...`);
+    // In headless mode, we can't truly rewind. Instead we start fresh and
+    // re-run the last prompt with --continue to pick up prior context.
+    state.active = false;
+    try {
+      const result = await runCommandCode(
+        `Re-run this prompt, ignoring the previous response: ${state.lastPrompt}`,
+        process.env.HOME,
+        { model: state.model, planMode: state.planMode, chatId, addDirs: state.addDirs }
+      );
+      await sendMessage(chatId, escapeMd(result));
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /fork — fork the conversation into a new session ──
+  if (ccSlash === "/fork") {
+    const state = getSession(chatId);
+    const name = args || `fork_${Date.now()}`;
+    await sendTyping(chatId);
+    await sendMessage(chatId, `🌿 Forking session as "${escapeMd(name)}"...`);
+    try {
+      const result = await runCommandCode(
+        "Continue this conversation in a new forked session. Summarize what we've done so far.",
+        process.env.HOME,
+        { continue: true, model: state.model, planMode: state.planMode, addDirs: state.addDirs }
+      );
+      state.sessionName = name;
+      await sendMessage(chatId, `🌿 *Forked session:* ${escapeMd(name)}\n\n${escapeMd(result)}`);
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /rename — rename the current session ──
+  if (ccSlash === "/rename") {
+    const state = getSession(chatId);
+    if (!args) {
+      await sendMessage(chatId, state.sessionName ? `📝 Current session name: ${escapeMd(state.sessionName)}` : "📝 No session name set. Use `/rename <name>` to name this session.");
+      return true;
+    }
+    state.sessionName = args;
+    await sendMessage(chatId, `📝 Session renamed to: *${escapeMd(args)}*`);
+    return true;
+  }
+
+  // ── /reload — restart the bot process ──
+  if (ccSlash === "/reload") {
+    await sendMessage(chatId, "🔄 Restarting bot... Session state will be preserved in config.");
+    // Persist current session model before restart
+    const state = getSession(chatId);
+    if (state.model) {
+      try {
+        const cfg = readCCConfig();
+        cfg.model = state.model;
+        writeCCConfig(cfg);
+      } catch {}
+    }
+    // Restart this process
+    setTimeout(() => {
+      process.exit(0);
+    }, 1000);
+    return true;
+  }
+
+  // ── /info — system information (cmd info) ──
+  if (ccSlash === "/info") {
+    await sendTyping(chatId);
+    try {
+      const { stdout, stderr, code } = await runCLI(["info"], 15_000);
+      const output = stdout || stderr || `(exit ${code})`;
+      const capped = output.length > 3800 ? output.slice(0, 3800) + "\n...(truncated)" : output;
+      await sendMessage(chatId, "```\n" + escapeMd(capped) + "\n```");
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /version — show Command Code version ──
+  if (ccSlash === "/version") {
+    await sendTyping(chatId);
+    try {
+      const { stdout } = await runCLI(["--version"], 10_000);
+      await sendMessage(chatId, `📦 *Command Code* v${escapeMd(stdout.trim())}`);
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /usage — show credits, plan, and usage metrics ──
+  if (ccSlash === "/usage") {
+    await sendTyping(chatId);
+    try {
+      const { stdout: whoami } = await runCLI(["whoami"], 10_000);
+      const { stdout: version } = await runCLI(["--version"], 10_000);
+      const state = getSession(chatId);
+      let modelName = state.model || "default";
+      if (!state.model) {
+        const { stdout: models } = await runCLI(["--list-models"], 10_000);
+        const m = models?.match(/^(\S+)\s+.+\(default\)/m);
+        if (m) modelName = m[1];
+      }
+      await sendMessage(
+        chatId,
+        `╔══ *Usage & Credits* ══\n` +
+        `╟ User: ${escapeMd(whoami || "not logged in")}\n` +
+        `╟ Version: v${escapeMd(version?.trim() || "?")}\n` +
+        `╟ Model: \`${escapeMd(modelName)}\`\n` +
+        `╟ Max turns: ${Number(process.env.COMMAND_CODE_MAX_TURNS) || 20}\n` +
+        `╟ YOLO: ${process.env.COMMAND_CODE_YOLO !== "false" ? "on" : "off"}\n` +
+        `╚══ _Detailed usage metrics require the TUI. Run \`cmd\` locally for full breakdown._`
+      );
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /update — update Command Code to latest version ──
+  if (ccSlash === "/update") {
+    await sendTyping(chatId);
+    await sendMessage(chatId, "⬆️ Updating Command Code...");
+    try {
+      const { stdout, stderr, code } = await runCLI(["update"], 120_000);
+      const output = stdout || stderr || `(exit ${code})`;
+      const capped = output.length > 3800 ? output.slice(0, 3800) + "\n...(truncated)" : output;
+      await sendMessage(chatId, "```\n" + escapeMd(capped) + "\n```");
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /context — show context window usage ──
+  if (ccSlash === "/context") {
+    const state = getSession(chatId);
+    await sendTyping(chatId);
+    await sendMessage(chatId, "📊 Checking context window usage...");
+    try {
+      const result = await runCommandCode(
+        "Show the current context window usage and breakdown. How many tokens are in context?",
+        process.env.HOME,
+        { continue: true, model: state.model, planMode: false, chatId, addDirs: state.addDirs }
+      );
+      await sendMessage(chatId, escapeMd(result));
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /configure-models — choose which model runs each task ──
+  if (ccSlash === "/configure-models") {
+    const state = getSession(chatId);
+    await sendTyping(chatId);
+    await sendMessage(chatId, "⚙️ Configuring model assignments...");
+    try {
+      const result = await runCommandCode(
+        "Show the current model configuration for each built-in task (main, summary, title, etc.) and help me configure which model runs each task.",
+        process.env.HOME,
+        { model: state.model, planMode: false, chatId, addDirs: state.addDirs }
+      );
+      await sendMessage(chatId, escapeMd(result));
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /compact-mode — select a compact mode ──
+  if (ccSlash === "/compact-mode") {
+    const state = getSession(chatId);
+    if (!args) {
+      await sendMessage(chatId, "🗜️ *Compact modes*\n\nUsage: `/compact-mode <mode>`\n\nIn headless mode, compacting is handled per-session. Use `/clear` to start fresh, or send a prompt with compacting instructions.");
+      return true;
+    }
+    await sendTyping(chatId);
+    await sendMessage(chatId, `🗜️ Setting compact mode: ${escapeMd(args)}...`);
+    try {
+      const result = await runCommandCode(
+        `Set the compact mode to: ${args}. Apply this compact mode configuration.`,
+        process.env.HOME,
+        { continue: true, model: state.model, planMode: false, chatId, addDirs: state.addDirs }
+      );
+      await sendMessage(chatId, escapeMd(result));
+    } catch (err) {
+      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+    }
+    return true;
+  }
+
+  // ── /courses — open Command Code courses ──
+  if (ccSlash === "/courses") {
+    await sendMessage(chatId, "📚 *Command Code Courses*\n\n[Open courses in browser](https://commandcode.ai/courses)\n\n_Learn how to get the most out of Command Code._");
+    return true;
+  }
+
   // ── TUI-only commands (inform the user) ──
+  // Most TUI commands now have Telegram-native implementations above.
+  // These are genuinely interactive-only and can't work remotely.
   const TUI_ONLY = new Set([
-    "/agents", "/compact", "/effort", "/ide", "/memory",
-    "/pr-comments", "/provider", "/rewind", "/terminal-setup",
-    "/add-dir",
+    "/ide", "/terminal-setup",
   ]);
 
   if (TUI_ONLY.has(ccSlash)) {
@@ -940,13 +1451,16 @@ async function processPrompt(chatId, userMsgId, statusMsgId, prompt, state) {
     // Progress step 1: thinking
     await editMessage(chatId, statusMsgId, `🤔 *Processing:* ${escapeMd(prompt.slice(0, 100))}...`);
 
-    // Prepend steer instruction if set
-    const finalPrompt = state.steer ? `${state.steer}\n\n${prompt}` : prompt;
+    // Prepend goal and steer instructions if set
+    const prefixParts = [];
+    if (state.goal) prefixParts.push(`[GOAL] ${state.goal}`);
+    if (state.steer) prefixParts.push(`[GUIDANCE] ${state.steer}`);
+    const finalPrompt = prefixParts.length > 0 ? `${prefixParts.join("\n")}\n\n${prompt}` : prompt;
 
     const result = await runCommandCode(
       finalPrompt,
       process.env.HOME,
-      { model: state.model, planMode: state.planMode, continue: state.active, chatId }
+      { model: state.model, planMode: state.planMode, continue: state.active, chatId, addDirs: state.addDirs }
     );
     state.active = true;
     if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
@@ -982,6 +1496,18 @@ async function processPrompt(chatId, userMsgId, statusMsgId, prompt, state) {
 
     // React ✅ on user's message (replaces 👀)
     await setReaction(chatId, userMsgId, "✅");
+
+    // Process queued prompts if any (Hermes-style queue draining)
+    if (state.queuedPrompts.length > 0) {
+      const nextPrompt = state.queuedPrompts.shift();
+      await sendMessage(chatId, `📋 *Running queued prompt:* ${escapeMd(nextPrompt.slice(0, 100))}`);
+      const queueMsg = await sendMessage(chatId, `🚀 Running: \`${escapeMd(nextPrompt.slice(0, 200))}\``);
+      const queueStatusId = queueMsg?.message_id || queueMsg?.result?.message_id;
+      if (queueStatusId) {
+        await processPrompt(chatId, userMsgId, queueStatusId, nextPrompt, state);
+      }
+    }
+
     return result;
   } catch (err) {
     await editMessage(chatId, statusMsgId, `❌ *Error:* ${escapeMd(err.message)}`);
@@ -1109,7 +1635,7 @@ async function poll() {
 
       // ── Slash commands ──
       if (text.startsWith("/")) {
-        const handled = await handleCommand(chatId, text);
+        const handled = await handleCommand(chatId, text, { userId, username, chatType });
         if (handled) continue;
 
         // /retry — re-run last prompt
