@@ -521,7 +521,7 @@ const BOT_COMMANDS = [
   { command: "context",    description: "Show context window usage" },
   { command: "courses",    description: "Open Command Code courses in browser" },
   { command: "effort",     description: "Set reasoning effort: /effort <low|medium|high|max>" },
-  { command: "exit",       description: "Exit session (N/A remotely)" },
+  { command: "exit",       description: "Silent no-op on Telegram (exits local session)" },
   { command: "feedback",   description: "Submit feedback about Command Code" },
   { command: "fork",       description: "Fork conversation into new session" },
   { command: "goal",       description: "Set objective: /goal <text|clear|status>" },
@@ -1562,9 +1562,15 @@ async function handleCommand(chatId, text, userInfo = {}) {
   }
 
   // ── N/A commands ──
-  const NA_CMDS = new Set(["/exit", "/share", "/unshare"]);
+  const NA_CMDS = new Set(["/share", "/unshare"]);
   if (NA_CMDS.has(ccSlash)) {
     await sendMessage(chatId, `ℹ️ ${ccSlash} is not applicable when using Command Code remotely via Telegram\\.`);
+    return true;
+  }
+
+  // ── /exit — brief acknowledgment on Telegram ──
+  if (ccSlash === "/exit") {
+    await sendMessage(chatId, "👋");
     return true;
   }
 
