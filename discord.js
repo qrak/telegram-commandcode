@@ -12,7 +12,7 @@
  *     COMMAND_CODE_CMD       — path to the `cmd` binary (default: "cmd")
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,6 +57,10 @@ if (!BOT_TOKEN) {
 
 const CMD_BIN = process.env.COMMAND_CODE_CMD || "cmd";
 
+// Security limits
+const MAX_PROMPT_LENGTH = 5000;
+const RATE_LIMIT_WINDOW = 2000;
+
 const ALLOWED = (process.env.DISCORD_ALLOWED_USERS || "any")
   .split(",")
   .map((s) => s.trim());
@@ -81,6 +85,7 @@ function resetSession(userId) {
 // ── Per-user message queue ──
 const messageQueues = new Map();
 const processing = new Set();
+const rateLimits = new Map();
 
 function enqueueMessage(userId, channel, prompt) {
   if (!messageQueues.has(userId)) {
@@ -110,6 +115,7 @@ async function processQueue(userId) {
 
 // ── Process tracking ──
 const runningProcesses = new Map();
+const backgroundProcesses = new Set();
 
 function getRunningProcess(userId) {
   return runningProcesses.get(userId) || null;
@@ -157,9 +163,16 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => { stdout += d.toString(); });
     child.stderr.on("data", (d) => { stderr += d.toString(); });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (sessionOpts.userId) runningProcesses.delete(sessionOpts.userId);
-      if (code === 0 || code === null) resolve(stdout.trim() || "(no output)");
+
+      // Process killed by signal — always an error
+      if (signal) {
+        resolve(`⚠️ ${CMD_BIN} killed by ${signal}`);
+        return;
+      }
+
+      if (code === 0) resolve(stdout.trim() || "(no output)");
       else {
         const reason = ({ 3: "not authenticated", 4: "permission denied" })[code] || `exit ${code}`;
         const errText = stderr.trim();
@@ -197,6 +210,7 @@ function findFilePaths(text) {
 async function runCLI(args, timeout = 15_000) {
   return new Promise((resolve) => {
     const child = spawn(CMD_BIN, args, {
+      cwd: process.env.HOME,
       env: { ...process.env },
       stdio: ["pipe", "pipe", "pipe"],
       timeout,
@@ -227,9 +241,11 @@ async function processPrompt(userId, channel, prompt, state) {
     state.active = true;
     if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
 
-    // Send final result
+    // Send final result — use warning prefix if cmd failed
     const truncated = result ? result.slice(0, 1900) : "";
-    const doneMsg = `✅ Done:\n\`\`\`\n${truncated}\n\`\`\``;
+    const isError = result?.startsWith("⚠️") || result?.startsWith("❌");
+    const prefix = isError ? "⚠️ Failed" : "✅ Done";
+    const doneMsg = `**${prefix}**\n\`\`\`\n${truncated}\n\`\`\``;
     await msg.edit(doneMsg).catch(() => channel.send(doneMsg));
 
     // Auto-send files
@@ -253,7 +269,64 @@ async function processPrompt(userId, channel, prompt, state) {
 // Discord bot
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Orphan cleanup
+// ---------------------------------------------------------------------------
+
+function killOrphanedCmdProcesses() {
+  try {
+    const result = execSync("ps axo pid,args --no-headers | grep -E 'cmd.* -p ' || true", {
+      encoding: "utf8", timeout: 5000,
+    });
+    if (!result) return;
+    const lines = result.trim().split("\n").filter(Boolean);
+    let killed = 0;
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      const pid = parseInt(parts[0], 10);
+      if (!pid || parts.length < 2) continue;
+      if (line.includes("grep") || line.includes("sh -c")) continue;
+      try {
+        process.kill(pid, "SIGTERM");
+        setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch {} }, 2000);
+        killed++;
+      } catch {}
+    }
+    if (killed > 0) console.log(`   Killed ${killed} orphaned cmd process(es)`);
+  } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown
+// ---------------------------------------------------------------------------
+
+function setupShutdown() {
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n${signal} received. Shutting down gracefully...`);
+    for (const [userId] of runningProcesses) {
+      killRunningProcess(userId);
+    }
+    for (const child of backgroundProcesses) {
+      if (!child.killed) {
+        try { child.kill("SIGINT"); setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 3000); } catch {}
+      }
+    }
+    setTimeout(() => process.exit(0), 500);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 async function main() {
+  setupShutdown();
+  killOrphanedCmdProcesses();
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -308,6 +381,21 @@ async function main() {
     }
 
     console.log(`📩 [${username}] ${content.slice(0, 80)}`);
+
+    // ── Rate limiting ──
+    const now = Date.now();
+    const lastMsg = rateLimits.get(userId);
+    if (lastMsg && (now - lastMsg) < RATE_LIMIT_WINDOW) {
+      console.log(`⏱️ Rate-limited user ${userId} (${username})`);
+      return;
+    }
+    rateLimits.set(userId, now);
+
+    // ── Prompt length validation ──
+    if (content && content.length > MAX_PROMPT_LENGTH) {
+      await channel.send(`⚠️ Prompt too long (${content.length} chars). Maximum: ${MAX_PROMPT_LENGTH} chars.`);
+      return;
+    }
 
     // Handle slash commands
     if (content.startsWith("/")) {
@@ -422,6 +510,8 @@ async function main() {
             cwd: process.env.HOME, env: { ...process.env },
             stdio: ["pipe", "pipe", "pipe"], timeout: 30 * 60 * 1000,
           });
+          backgroundProcesses.add(child);
+          child.on("close", () => { backgroundProcesses.delete(child); });
           let stdout = "", stderr = "";
           child.stdout.on("data", (d) => { stdout += d.toString(); });
           child.stderr.on("data", (d) => { stderr += d.toString(); });

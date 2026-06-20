@@ -15,7 +15,7 @@
  *     COMMAND_CODE_CMD        — path to the `cmd` binary (default: "cmd")
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -116,6 +116,10 @@ if (!BOT_TOKEN) {
 
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const CMD_BIN = process.env.COMMAND_CODE_CMD || "cmd";
+
+// Security limits
+const MAX_PROMPT_LENGTH = 5000; // max characters per prompt
+const RATE_LIMIT_WINDOW = 2000;  // ms between successive prompts from same user
 
 // Access control: comma-separated user IDs or "any" for open access
 const ALLOWED = (process.env.TELEGRAM_ALLOWED_USERS || "any")
@@ -440,10 +444,17 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
       stderr += data.toString();
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       // Clean up process tracking
       if (sessionOpts.chatId) {
         runningProcesses.delete(sessionOpts.chatId);
+      }
+
+      // Process killed by signal (not a normal exit) — always an error
+      if (signal) {
+        const msg = `⚠️ ${CMD_BIN} killed by ${signal}`;
+        resolve(msg);
+        return;
       }
 
       const exitCodes = {
@@ -457,7 +468,7 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
         130: "interrupted",
       };
 
-      if (code === 0 || code === null) {
+      if (code === 0) {
         resolve(stdout.trim() || "(no output)");
       } else {
         const reason = exitCodes[code] || `exit code ${code}`;
@@ -569,6 +580,7 @@ function resetSession(chatId) {
 // ── Per-user message queue (non-blocking input like Hermes) ──
 const messageQueues = new Map();  // chatId → { chatId, userMsgId, statusMsgId, prompt }[]
 const processing = new Set();     // Set of chatIds currently processing a message
+const rateLimits = new Map();    // userId → last message timestamp
 
 function enqueueMessage(chatId, userMsgId, statusMsgId, prompt) {
   if (!messageQueues.has(chatId)) {
@@ -604,6 +616,7 @@ async function processQueue(chatId) {
 
 // Per-user running process tracking — supports interrupting running commands
 const runningProcesses = new Map();
+const backgroundProcesses = new Set(); // detached bg processes (not per-user)
 
 function getRunningProcess(chatId) {
   return runningProcesses.get(chatId) || null;
@@ -631,6 +644,7 @@ function killRunningProcess(chatId) {
 async function runCLI(args, timeout = 15_000) {
   return new Promise((resolve) => {
     const child = spawn(CMD_BIN, args, {
+      cwd: process.env.HOME,
       env: { ...process.env },
       stdio: ["pipe", "pipe", "pipe"],
       timeout,
@@ -678,8 +692,20 @@ async function handleCommand(chatId, text, userInfo = {}) {
     try {
       const { stdout, stderr, code } = await runCLI(cliArgs, 30_000);
       const output = stdout || stderr || `(exit ${code})`;
-      const capped = output.length > 3800 ? output.slice(0, 3800) + "\n...(truncated)" : output;
-      await sendMessage(chatId, "```\n" + escapeMd(capped) + "\n```");
+      // If command failed with an unknown-subcommand error, show help instead
+      if (code !== 0 && stderr && !stdout && cliArgs.length > 1) {
+        const helpResult = await runCLI(cliArgs.slice(0, 1).concat(["--help"]), 10_000);
+        const helpText = helpResult.stdout || "";
+        if (helpText) {
+          const capped = helpText.length > 3800 ? helpText.slice(0, 3800) + "\n...(truncated)" : helpText;
+          await sendMessage(chatId, "```\n" + escapeMd(capped) + "\n```");
+        } else {
+          await sendMessage(chatId, "```\n" + escapeMd(capped) + "\n```");
+        }
+      } else {
+        const capped = output.length > 3800 ? output.slice(0, 3800) + "\n...(truncated)" : output;
+        await sendMessage(chatId, "```\n" + escapeMd(capped) + "\n```");
+      }
     } catch (err) {
       await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
     }
@@ -923,6 +949,8 @@ async function handleCommand(chatId, text, userInfo = {}) {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 30 * 60 * 1000, // 30 min timeout for background tasks
     });
+    backgroundProcesses.add(child);
+    child.on("close", () => { backgroundProcesses.delete(child); });
 
     let stdout = "";
     let stderr = "";
@@ -1435,6 +1463,7 @@ async function handleCommand(chatId, text, userInfo = {}) {
 // ---------------------------------------------------------------------------
 
 let lastUpdateId = 0;
+let botInfoCache = null; // cached getMe result
 
 /**
  * Process a user prompt through Command Code with reactions + single-message editing.
@@ -1465,10 +1494,12 @@ async function processPrompt(chatId, userMsgId, statusMsgId, prompt, state) {
     state.active = true;
     if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
 
-    // Build final response
+    // Build final response — use warning/error prefix if cmd failed
+    const isError = result?.startsWith("⚠️") || result?.startsWith("❌");
+    const prefix = isError ? "⚠️" : "✅";
     const escapedResult = result ? escapeMd(result) : "";
     const doneMsg = result
-      ? `✅ *Done:* ${escapeMd(prompt.slice(0, 100))}\n\n${escapedResult}`
+      ? `${prefix} *${isError ? "Failed" : "Done"}:* ${escapeMd(prompt.slice(0, 100))}\n\n${escapedResult}`
       : `✅ *Done* \\— ${escapeMd(prompt.slice(0, 100))}`;
 
     // Edit the status message with the final result
@@ -1546,10 +1577,10 @@ async function poll() {
       allowed_updates: ["message"],
     });
 
-    // Get bot info once per poll cycle for mention/reply checks
-    const botInfo = await api("getMe", {});
-    const botUsername = botInfo.username;
-    const botId = botInfo.id;
+    // Get bot info (cached) for mention/reply checks
+    if (!botInfoCache) botInfoCache = await api("getMe", {});
+    const botUsername = botInfoCache.username;
+    const botId = botInfoCache.id;
 
     for (const update of updates) {
       lastUpdateId = update.update_id;
@@ -1578,6 +1609,22 @@ async function poll() {
       }
 
       console.log(`📩 [${username}] [${chatType}] ${(text || "(media)").slice(0, 80)}`);
+
+      // ── Rate limiting ──
+      const now = Date.now();
+      const lastMsg = rateLimits.get(userId);
+      if (lastMsg && (now - lastMsg) < RATE_LIMIT_WINDOW) {
+        console.log(`⏱️ Rate-limited user ${userId} (${username})`);
+        setReaction(chatId, msg.message_id, "⏱️").catch(() => {});
+        continue;
+      }
+      rateLimits.set(userId, now);
+
+      // ── Prompt length validation ──
+      if (text && text.length > MAX_PROMPT_LENGTH) {
+        await sendMessage(chatId, escapeMd(`⚠️ Prompt too long (${text.length} chars). Maximum allowed: ${MAX_PROMPT_LENGTH} chars.`));
+        continue;
+      }
 
       // ── Handle media messages (photos, documents, voice) ──
       let mediaPrompt = null;
@@ -1682,6 +1729,45 @@ async function poll() {
 }
 
 // ---------------------------------------------------------------------------
+// Orphan cleanup — kill stale cmd processes from crashed bot instances
+// ---------------------------------------------------------------------------
+
+/**
+ * Kill any orphaned `cmd -p` processes that aren't tracked by this bot.
+ * Called on startup to clean up processes left by a crashed bot instance.
+ */
+function killOrphanedCmdProcesses() {
+  try {
+    const result = execSync("ps axo pid,args --no-headers | grep -E 'cmd.* -p ' || true", {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    if (!result) return;
+
+    const lines = result.trim().split("\n").filter(Boolean);
+    let killed = 0;
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      const pid = parseInt(parts[0], 10);
+      if (!pid || parts.length < 2) continue;
+      // Skip the grep command itself and our own process
+      if (line.includes("grep") || line.includes("sh -c")) continue;
+      try {
+        process.kill(pid, "SIGTERM");
+        // Force kill after 2s if it didn't stop
+        setTimeout(() => {
+          try { process.kill(pid, "SIGKILL"); } catch {}
+        }, 2000);
+        killed++;
+      } catch {}
+    }
+    if (killed > 0) console.log(`   Killed ${killed} orphaned cmd process(es)`);
+  } catch {
+    // ps/grep not available — skip orphan cleanup
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Graceful shutdown
 // ---------------------------------------------------------------------------
 
@@ -1692,9 +1778,22 @@ function setupShutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`\n${signal} received. Shutting down gracefully...`);
-    // lastUpdateId is already in memory; if we wanted persistence
-    // we could save it, but for a daemon restarting is fine.
-    process.exit(0);
+
+    // Kill all tracked running processes so they don't become orphans
+    for (const [chatId] of runningProcesses) {
+      killRunningProcess(chatId);
+    }
+    // Also kill detached background processes
+    for (const child of backgroundProcesses) {
+      if (!child.killed) {
+        try {
+          child.kill("SIGINT");
+          setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 3000);
+        } catch {}
+      }
+    }
+
+    setTimeout(() => process.exit(0), 500);
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));
@@ -1707,6 +1806,7 @@ function setupShutdown() {
 
 async function main() {
   setupShutdown();
+  killOrphanedCmdProcesses();
 
   console.log(`🤖 telegram-commandcode bot starting`);
   console.log(`   Bot: @${(await api("getMe", {})).username}`);
