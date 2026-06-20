@@ -387,8 +387,8 @@ async function handleCommand(chatId, text) {
   if (ccSlash === "/start") {
     await sendMessage(
       chatId,
-      "🤖 *Command Code Bot*\\n\\n" +
-      "I connect Telegram to your Command Code CLI\\. All 27 CC commands are available \\(type `/` to see them\\)\\.\\n\\n" +
+      "🤖 *Command Code Bot*\n\n" +
+      "I connect Telegram to your Command Code CLI\\. All 27 CC commands are available \\(type `/` to see them\\)\\.\n\n" +
       "*Send any prompt* and I'll run `cmd \\-p` \\(headless mode\\)\\."
     );
     return true;
