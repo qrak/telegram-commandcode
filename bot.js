@@ -377,6 +377,7 @@ function isAllowed(user) {
  */
 async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) {
   const args = ["-p", prompt];
+  const onChunk = sessionOpts.onChunk; // optional streaming callback(text) — called with accumulated stdout
 
   // Permissions: --yolo enables all tools (file writes, shell). 
   // Omit for read-only safety. Use --permission-mode plan for plan mode.
@@ -435,9 +436,19 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
 
     let stdout = "";
     let stderr = "";
+    let lastStream = 0;
 
     child.stdout.on("data", (data) => {
       stdout += data.toString();
+      // Throttle streaming updates to ~1 per 500ms
+      if (onChunk) {
+        const now = Date.now();
+        if (now - lastStream > 500) {
+          lastStream = now;
+          const text = stdout.trim();
+          if (text) onChunk(text);
+        }
+      }
     });
 
     child.stderr.on("data", (data) => {
@@ -448,6 +459,12 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
       // Clean up process tracking
       if (sessionOpts.chatId) {
         runningProcesses.delete(sessionOpts.chatId);
+      }
+
+      // Final streaming update before resolving
+      if (onChunk) {
+        const text = stdout.trim();
+        if (text) onChunk(text);
       }
 
       // Process killed by signal (not a normal exit) — always an error
@@ -516,6 +533,7 @@ const BOT_COMMANDS = [
   { command: "login",      description: "Authenticate with Command Code" },
   { command: "logout",     description: "Remove stored authentication" },
   { command: "mcp",        description: "Manage MCP server connections" },
+  { command: "about",      description: "Show bot info and links" },
   { command: "memory",     description: "Manage memory: /memory or /memory <instruction>" },
   { command: "model",      description: "List models or switch: /model <name>" },
   { command: "new",        description: "Clear session — same as /clear" },
@@ -717,31 +735,114 @@ async function handleCommand(chatId, text, userInfo = {}) {
 
   // ── /start ──
   if (ccSlash === "/start") {
-    await sendMessage(
-      chatId,
+    await api("sendMessage", {
+      chat_id: chatId,
+      text: "🤖 *Command Code Bot* — Telegram → CLI bridge\n\n" +
+        "I connect Telegram to your Command Code\\. Send any prompt, and I'll run `cmd \\-p` in headless mode and stream the response back\\.\n\n" +
+        "*✨ Features*\n" +
+        "  🎤 Voice messages → Whisper transcription\n" +
+        "  📷 Photo/file analysis via vision models\n" +
+        "  ⏳ Live streaming response output\n" +
+        "  🧹 Session chaining with `/clear`, `/resume`\n" +
+        "  🎯 Goal + steer guidance\n" +
+        "  📋 Queue multiple prompts\n" +
+        "  🔄 Background tasks with `/background`\n" +
+        "  💾 Taste learning & memory management\n\n" +
+        "*Quick start:* send any message to chat\\!\n" +
+        "Type `/help` for all commands, `/model` to pick a model\\.",
+      parse_mode: "MarkdownV2",
+      link_preview_options: { is_disabled: true },
+      reply_markup: JSON.stringify({
+        inline_keyboard: [
+          [
+            { text: "📋 Commands", callback_data: "help:commands" },
+            { text: "🤖 Models", callback_data: "model:listall" },
+          ],
+        ],
+      }),
+    });
+    return true;
+  }
+
+  // ── /about ──
+  if (ccSlash === "/about") {
+    await sendMessage(chatId,
       "🤖 *Command Code Bot*\n\n" +
-      "I connect Telegram to your Command Code CLI\\. All CC commands are available \\(type `/` to see them\\)\\.\n\n" +
-      "*Send any prompt* and I'll run `cmd \\-p` \\(headless mode\\)\\.\n\n" +
-      "_Key commands:_\n" +
-      "  `/goal <text>` \\- set a standing objective\n" +
-      "  `/steer <text>` \\- mid\\-session guidance\n" +
-      "  `/model <name>` \\- switch model\n" +
-      "  `/effort <level>` \\- set reasoning effort\n" +
-      "  `/background <p>` \\- run in background\n" +
-      "  `/queue <p>` \\- queue for next turn\n" +
-      "  `/status` \\- show environment\n" +
-      "  `/resume` \\- resume last session"
+      "A production\\-grade Telegram bridge for [Command Code](https://commandcode\\.ai)\\.\n\n" +
+      "*Stack:* Node\\.js \\(ESM\\), Telegram Bot API, `cmd` CLI\n" +
+      "*Commands:* 49 registered, organized into 8 categories\n" +
+      "*Deployment:* systemd user service with auto\\-restart\n" +
+      "*Media:* Photos \\, documents \\, voice → Whisper transcription\n" +
+      "*Process mgmt:* Orphan cleanup \\, graceful shutdown \\, per\\-user queue\n\n" +
+      "Source: [github\\.com/qrak/telegram\\-commandcode](https://github.com/qrak/telegram-commandcode)"
     );
     return true;
   }
 
   // ── /help ──
   if (ccSlash === "/help") {
-    const cmds = BOT_COMMANDS.map(c => {
-      const slash = TG_TO_CC[c.command] || "/" + c.command;
-      return `  ${slash} \\- ${escapeMd(c.description)}`;
-    }).join("\n");
-    await sendMessage(chatId, `*Command Code commands:*\n${cmds}\n\n_Any other message → ` + "`cmd -p`" + ` prompt_`);
+    const categories = [
+      {
+        title: "💬 *Session*",
+        cmds: ["new", "clear", "undo", "fork", "rename", "resume", "context", "compact"],
+      },
+      {
+        title: "🎯 *Guidance*",
+        cmds: ["goal", "steer", "plan", "queue", "retry", "background", "stop"],
+      },
+      {
+        title: "🤖 *Models*",
+        cmds: ["model", "effort", "provider", "configuremodels"],
+      },
+      {
+        title: "📦 *Knowledge*",
+        cmds: ["taste", "memory", "skills", "mcp", "learntaste"],
+      },
+      {
+        title: "🔧 *System*",
+        cmds: ["status", "info", "whoami", "usage", "version", "reload", "update"],
+      },
+      {
+        title: "🛠️ *Tools*",
+        cmds: ["add_dir", "init", "review", "prcomments", "agents"],
+      },
+      {
+        title: "🔐 *Auth*",
+        cmds: ["login", "logout"],
+      },
+      {
+        title: "📖 *Help*",
+        cmds: ["help", "start"],
+      },
+    ];
+
+    const lines = [];
+    for (const cat of categories) {
+      const cmdLines = cat.cmds
+        .filter(cmd => BOT_COMMANDS.some(bc => bc.command === cmd))
+        .map(cmd => {
+          const bc = BOT_COMMANDS.find(b => b.command === cmd);
+          const slash = TG_TO_CC[cmd] || "/" + cmd;
+          return `  \`${slash}\` \\- ${escapeMd(bc.description)}`;
+        });
+      if (cmdLines.length > 0) {
+        lines.push(`${cat.title}\n${cmdLines.join("\n")}`);
+      }
+    }
+
+    // Commands not in any category
+    const categorized = new Set(categories.flatMap(c => c.cmds));
+    const miscCmds = BOT_COMMANDS
+      .filter(bc => !categorized.has(bc.command))
+      .map(bc => {
+        const slash = TG_TO_CC[bc.command] || "/" + bc.command;
+        return `  \`${slash}\` \\- ${escapeMd(bc.description)}`;
+      });
+    if (miscCmds.length > 0) {
+      lines.push(`📁 *Other*\n${miscCmds.join("\n")}`);
+    }
+
+    await sendMessage(chatId, lines.join("\n\n") + `\n\n_Any other message → ` + "`cmd -p`" + ` prompt_`);
     return true;
   }
 
@@ -840,29 +941,54 @@ async function handleCommand(chatId, text, userInfo = {}) {
       return true;
     }
 
-    // /model (no args) → list available models
+    // /model (no args) → show interactive model picker
     await sendTyping(chatId);
     try {
       const { stdout } = await runCLI(["--list-models"], 15_000);
-      const models = stdout || "Run `cmd --list-models` locally";
-      const preview = models.length > 3500 ? models.slice(0, 3500) + "\n...(truncated)" : models;
 
-      // Extract the default model from the listing (line with "(default)")
+      // Extract the default model
       let defaultModel = "unknown";
       const defaultMatch = stdout?.match(/^(\S+)\s+.+\(default\)/m);
       if (defaultMatch) defaultModel = defaultMatch[1];
 
-      const current = state.model
-        ? "\n*Currently selected:* `" + escapeMd(state.model) + "`\n"
-        : "\n*Default model:* `" + escapeMd(defaultModel) + "`\n";
-      await sendMessage(
-        chatId,
-        "🤖 *Available models*\n\n```\n" + escapeMd(preview) + "\n```\n" +
-        current +
-        "\n_Use `/model <name>` to switch, e\\.g\\. `/model claude-sonnet-4-6`_"
-      );
+      const currentLabel = state.model
+        ? `*Currently:* ${escapeMd(state.model)}`
+        : `*Default:* ${escapeMd(defaultModel)}`;
+
+      // Build inline keyboard: popular models for quick-select
+      const popularModels = [
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
+        "moonshotai/Kimi-K2.7-Code",
+        "Qwen/Qwen3.7-Max",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "gpt-5.5",
+        "google/gemini-3.5-flash",
+      ];
+
+      const rows = [];
+      for (let i = 0; i < popularModels.length; i += 2) {
+        const row = [];
+        const name = popularModels[i].split("/").pop();
+        row.push({ text: name.length > 20 ? name.slice(0, 18) + "…" : name, callback_data: "model:" + popularModels[i] });
+        if (i + 1 < popularModels.length) {
+          const name2 = popularModels[i + 1].split("/").pop();
+          row.push({ text: name2.length > 20 ? name2.slice(0, 18) + "…" : name2, callback_data: "model:" + popularModels[i + 1] });
+        }
+        rows.push(row);
+      }
+      rows.push([{ text: "📋 Show all models", callback_data: "model:listall" }]);
+
+      await api("sendMessage", {
+        chat_id: chatId,
+        text: `🤖 *Pick a model*\n${currentLabel}\n\n_Tap a button or type \`/model <name>\`_`,
+        parse_mode: "MarkdownV2",
+        link_preview_options: { is_disabled: true },
+        reply_markup: JSON.stringify({ inline_keyboard: rows }),
+      });
     } catch (err) {
-      await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
+      await sendMessage(chatId, escapeMd(`❌ Failed to fetch models: ${err.message}`));
     }
     return true;
   }
@@ -1492,7 +1618,18 @@ async function processPrompt(chatId, userMsgId, statusMsgId, prompt, state) {
     const result = await runCommandCode(
       finalPrompt,
       process.env.HOME,
-      { model: state.model, planMode: state.planMode, continue: state.active, chatId, addDirs: state.addDirs }
+      {
+        model: state.model,
+        planMode: state.planMode,
+        continue: state.active,
+        chatId,
+        addDirs: state.addDirs,
+        // Stream output chunks as they arrive (edits status msg in place)
+        onChunk: (chunk) => {
+          const preview = escapeMd(chunk).slice(0, 3500);
+          editMessage(chatId, statusMsgId, `⏳ *Running:* ${escapeMd(prompt.slice(0, 80))}...\n\n\`\`\`\n${preview}\n\`\`\``).catch(() => {});
+        },
+      }
     );
     state.active = true;
     if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
@@ -1577,7 +1714,7 @@ async function poll() {
     const updates = await api("getUpdates", {
       offset: lastUpdateId + 1,
       timeout: 30,
-      allowed_updates: ["message"],
+      allowed_updates: ["message", "callback_query"],
     });
 
     // Get bot info (cached) for mention/reply checks
@@ -1587,6 +1724,75 @@ async function poll() {
 
     for (const update of updates) {
       lastUpdateId = update.update_id;
+
+      // ── Handle callback queries (inline keyboard button presses) ──
+      if (update.callback_query) {
+        const cq = update.callback_query;
+        const cqChatId = String(cq.message.chat.id);
+        const cqMsgId = cq.message.message_id;
+        const cqUserId = cq.from?.id;
+
+        if (!isAllowed(cqUserId)) {
+          await api("answerCallbackQuery", { callback_query_id: cq.id, text: "⛔ Not authorized", show_alert: true }).catch(() => {});
+          continue;
+        }
+
+        if (cq.data.startsWith("model:")) {
+          const modelId = cq.data.slice(6);
+
+          // "listall" — show the full model list as text
+          if (modelId === "listall") {
+            await api("answerCallbackQuery", { callback_query_id: cq.id }).catch(() => {});
+            const { stdout } = await runCLI(["--list-models"], 15_000);
+            const models = stdout || "No models found";
+            const preview = models.length > 3800 ? models.slice(0, 3800) + "\n...(truncated)" : models;
+            await editMessage(cqChatId, cqMsgId, "🤖 *All available models*\n\n```\n" + escapeMd(preview) + "\n```\n_Use `/model <name>` to switch_");
+            continue;
+          }
+
+          const state = getSession(cqChatId);
+          state.model = modelId;
+          try {
+            const cfg = readCCConfig();
+            cfg.model = modelId;
+            writeCCConfig(cfg);
+          } catch {}
+          await api("answerCallbackQuery", { callback_query_id: cq.id, text: `✅ Switched to ${modelId.split("/").pop()}`, show_alert: false }).catch(() => {});
+          await editMessage(cqChatId, cqMsgId, `✅ Switched to model: *${escapeMd(modelId)}*`);
+        }
+
+        // "help:commands" — show categorized command list
+        if (cq.data === "help:commands") {
+          await api("answerCallbackQuery", { callback_query_id: cq.id }).catch(() => {});
+          // Simulate /help by re-rendering the command that handles /help
+          const msg = cq.message;
+          // We send a reply with the help text via sendMessage since editMessage
+          // would likely be too long — use sendMessage with text reply
+          const helpText = await (async () => {
+            const categories = [
+              { title: "💬 *Session*", cmds: ["new", "clear", "undo", "fork", "rename", "resume", "context", "compact"] },
+              { title: "🎯 *Guidance*", cmds: ["goal", "steer", "plan", "queue", "retry", "background", "stop"] },
+              { title: "🤖 *Models*", cmds: ["model", "effort", "provider", "configuremodels"] },
+              { title: "📦 *Knowledge*", cmds: ["taste", "memory", "skills", "mcp", "learntaste"] },
+              { title: "🔧 *System*", cmds: ["status", "info", "whoami", "usage", "version", "reload", "update"] },
+              { title: "🛠️ *Tools*", cmds: ["add_dir", "init", "review", "prcomments", "agents"] },
+              { title: "🔐 *Auth*", cmds: ["login", "logout"] },
+            ];
+            return categories.map(cat => {
+              const cmdLines = cat.cmds
+                .filter(cmd => BOT_COMMANDS.some(bc => bc.command === cmd))
+                .map(cmd => {
+                  const bc = BOT_COMMANDS.find(b => b.command === cmd);
+                  const slash = TG_TO_CC[cmd] || "/" + cmd;
+                  return `  \`${slash}\` \\- ${escapeMd(bc.description)}`;
+                });
+              return `${cat.title}\n${cmdLines.join("\n")}`;
+            }).join("\n\n");
+          })();
+          await sendMessage(cqChatId, helpText);
+        }
+        continue;
+      }
 
       const msg = update.message;
       if (!msg) continue;

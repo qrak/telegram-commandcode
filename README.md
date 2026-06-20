@@ -106,17 +106,20 @@ The daemon supports **multiple concurrent users** — each user gets their own s
 | **🎤 Voice transcription** | Voice messages transcribed via OpenAI Whisper (requires `OPENAI_API_KEY`) |
 | **📎 Auto-send files** | File paths in `cmd` output are automatically uploaded as Telegram attachments |
 | **👥 Group chat** | Bot responds when @mentioned or replied to in groups |
-| **✏️ Single-message editing** | Status message is edited in-place with the final result — no chat clutter |
+| **✏️ Single-message streaming** | Status message shows live output as it arrives, then finalizes with ✅/⚠️ |
 | **🔄 Session chaining** | `/resume` reads actual CC session history, `/clear` starts fresh |
 | **🎯 Goal tracking** | `/goal <text>` sets a standing objective prepended to all prompts |
 | **🧭 Mid-session steering** | `/steer <text>` injects guidance into all subsequent prompts |
 | **📋 Prompt queueing** | `/queue <prompt>` queues for next turn, auto-drains after completion |
 | **🔄 Background tasks** | `/background <prompt>` runs detached, notifies on completion |
 | **⚙️ Config persistence** | Model, provider, and effort settings persist to `~/.commandcode/config.json` |
+| **🔘 Interactive model picker** | `/model` shows inline keyboard buttons for top models |
+| **🗂️ Categorized help** | `/help` groups commands by category (Session, Models, System, etc.) |
+| **ℹ️ About command** | `/about` shows bot info, stack, and source link |
 
 ### Slash Commands
 
-Type `/` in the Telegram message box — **all 46 commands** are registered:
+Type `/` in the Telegram message box — **all 49 commands** are registered:
 
 **🟢 CLI-mapped (run directly)**
 
@@ -221,11 +224,12 @@ Bot:             🔧 Command Code Status
 1. Daemon polls Telegram via `getUpdates` (long polling, 30s timeout)
 2. Incoming message → bot adds 👀 reaction, sends a status message
 3. `cmd -p "prompt" --yolo --max-turns 20` runs headless
-4. Status message is **edited in place** with the final result (no duplicate messages)
-5. Reaction changes to ✅ (success) or ❌ (error)
-6. File paths detected in output are auto-sent as Telegram attachments
-7. Session chaining via `cmd -p --continue` (context preserved between messages)
-8. `/clear` drops `--continue` → fresh session
+4. **Output is streamed live** — response chunks appear in the status message as `cmd` produces them, updated every ~500ms
+5. Status message **finalizes** with `✅ Done:` (success) or `⚠️ Failed:` (error) prefix
+6. Reaction changes to ✅ (success) or ❌ (error)
+7. File paths detected in output are auto-sent as Telegram attachments
+8. Session chaining via `cmd -p --continue` (context preserved between messages)
+9. `/clear` drops `--continue` → fresh session
 
 ---
 
