@@ -517,6 +517,7 @@ const BOT_COMMANDS = [
   { command: "mcp",        description: "Manage MCP server connections" },
   { command: "memory",     description: "Manage memory: /memory or /memory <instruction>" },
   { command: "model",      description: "List models or switch: /model <name>" },
+  { command: "new",        description: "Clear session — same as /clear" },
   { command: "plan",       description: "Enter plan mode or plan a task" },
   { command: "prcomments", description: "Fetch PR comments for current branch" },
   { command: "provider",   description: "Set AI provider: /provider <name>" },
