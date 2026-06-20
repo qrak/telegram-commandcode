@@ -40,6 +40,47 @@ Or via npx:
 TELEGRAM_ALLOWED_USERS=any npx telegram-commandcode-bot
 ```
 
+### systemd service (persistent across reboots)
+
+```bash
+# Create user service
+cat > ~/.config/systemd/user/telegram-commandcode-bot.service << 'EOF'
+[Unit]
+Description=Telegram Command Code Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/path/to/node /home/user/telegram-commandcode/bot.js
+WorkingDirectory=/home/user/telegram-commandcode
+Environment="PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="TELEGRAM_BOT_TOKEN=your_token"
+Environment="COMMAND_CODE_YOLO=true"
+Environment="COMMAND_CODE_MAX_TURNS=20"
+Restart=always
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable lingering (so user services start at boot)
+loginctl enable-linger $USER
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable telegram-commandcode-bot.service
+systemctl --user start telegram-commandcode-bot.service
+
+# Check logs
+journalctl --user -u telegram-commandcode-bot.service -f
+```
+
 ### Env vars
 
 | Variable | Default | Description |
@@ -66,11 +107,16 @@ The daemon supports **multiple concurrent users** — each user gets their own s
 | **📎 Auto-send files** | File paths in `cmd` output are automatically uploaded as Telegram attachments |
 | **👥 Group chat** | Bot responds when @mentioned or replied to in groups |
 | **✏️ Single-message editing** | Status message is edited in-place with the final result — no chat clutter |
-| **🔄 Session chaining** | `/resume` continues previous context, `/clear` starts fresh |
+| **🔄 Session chaining** | `/resume` reads actual CC session history, `/clear` starts fresh |
+| **🎯 Goal tracking** | `/goal <text>` sets a standing objective prepended to all prompts |
+| **🧭 Mid-session steering** | `/steer <text>` injects guidance into all subsequent prompts |
+| **📋 Prompt queueing** | `/queue <prompt>` queues for next turn, auto-drains after completion |
+| **🔄 Background tasks** | `/background <prompt>` runs detached, notifies on completion |
+| **⚙️ Config persistence** | Model, provider, and effort settings persist to `~/.commandcode/config.json` |
 
 ### Slash Commands
 
-Type `/` in the Telegram message box — **all 27 Command Code commands** are registered:
+Type `/` in the Telegram message box — **all 46 commands** are registered:
 
 **🟢 CLI-mapped (run directly)**
 
@@ -83,20 +129,65 @@ Type `/` in the Telegram message box — **all 27 Command Code commands** are re
 | `/mcp [list/add/remove]` | Manage MCP servers | `cmd mcp` |
 | `/skills [list/add/remove]` | Manage skills | `cmd skills` |
 | `/taste [list/push/pull]` | Manage taste | `cmd taste` |
-| `/status` | Version, auth, session info | `cmd whoami` + `cmd --version` |
-| `/model [name]` | List models or `/model claude-sonnet-4-6` to switch | `cmd --list-models` or `cmd -m <name>` |
-| `/resume` | Continue last session | `cmd -p --continue` |
-| `/clear` | Fresh session (forget context) | drops `--continue` |
-| `/plan [task]` | Toggle plan mode or `/plan <task>` for one-shot | `cmd -p --plan` |
-| `/review <PR#>` | Review a pull request | `cmd -p` prompt |
-| `/init` | Create AGENTS.md | `cmd -p` prompt |
-| `/cmd <prompt>` | Explicit prompt alias | `cmd -p` prompt |
+| `/info` | System information | `cmd info` |
+| `/version` | Show version | `cmd --version` |
+| `/update` | Update Command Code | `cmd update` |
 
-**ℹ️ TUI-only (informational)**
+**⚙️ Config & session management**
 
-`/agents` · `/compact` · `/effort` · `/ide` · `/memory` · `/pr-comments` · `/provider` · `/rewind` · `/terminal-setup` · `/add-dir`
+| Command | Action |
+|---|---|
+| `/status` | Show model, goal, steer, session, config overview |
+| `/model [name]` | List models or switch (persists to config.json) |
+| `/effort <level>` | Set reasoning effort: low, medium, high, xhigh, max (also `/reasoning`, `/reason`) |
+| `/provider <name>` | Switch AI provider (persists to config.json) |
+| `/add-dir <path>` | Add directory to workspace context (passed as `--add-dir`) |
+| `/goal <text\|clear\|status>` | Set standing objective prepended to all prompts |
+| `/steer <text\|clear>` | Mid-session guidance prepended to all prompts |
+| `/plan [task]` | Toggle plan mode or `/plan <task>` for one-shot |
+| `/compact-mode <mode>` | Set compact mode via prompt |
+| `/configure-models` | Configure model per built-in task |
+| `/context` | Show context window usage |
 
-Bot politely explains these require interactive TUI mode.
+**🔄 Session control**
+
+| Command | Action |
+|---|---|
+| `/resume` | Resume last session (reads CC session history from `~/.commandcode/projects/`) |
+| `/clear` `/new` | Fresh session (reset model, plan, goal, steer) |
+| `/fork [name]` | Fork conversation into new session |
+| `/rename <name>` | Name the current session |
+| `/undo [N]` | Re-run last prompt with adjusted context |
+| `/retry` | Re-run the last prompt |
+| `/queue <prompt>` | Queue prompt for next turn (auto-drains after current task) |
+| `/background <prompt>` | Run task in background, notify on completion |
+| `/stop` | Kill running process |
+| `/reload` | Restart bot (preserves model in config) |
+
+**📝 Prompt-based commands**
+
+| Command | Action |
+|---|---|
+| `/review <PR#>` | Review a pull request |
+| `/init` | Create/update AGENTS.md |
+| `/memory [instruction]` | Show AGENTS.md or manage memory via prompt |
+| `/pr-comments [PR#]` | Fetch PR comments via `gh` |
+| `/agents` | Show agent config info |
+| `/compact` | Explains headless mode limitation (suggests `/clear`) |
+| `/cmd <prompt>` | Explicit prompt alias |
+
+**ℹ️ Info**
+
+| Command | Action |
+|---|---|
+| `/whoami` | Show your Telegram user info |
+| `/usage` | Show credits, plan, model, config |
+| `/courses` | Link to Command Code courses |
+| `/help` | List all commands |
+
+**ℹ️ TUI-only (local terminal required)**
+
+`/ide` · `/rewind` · `/terminal-setup`
 
 **⛔ N/A remotely**
 
