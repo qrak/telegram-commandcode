@@ -349,6 +349,11 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
   // Skip onboarding for automated runs
   args.push("--skip-onboarding");
 
+  // Kill any previous running process for this user (interrupt support)
+  if (sessionOpts.chatId) {
+    killRunningProcess(sessionOpts.chatId);
+  }
+
   return new Promise((resolve, reject) => {
     const child = spawn(CMD_BIN, args, {
       cwd,
@@ -356,6 +361,11 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 10 * 60 * 1000, // 10 minute timeout for complex tasks
     });
+
+    // Register for interrupt support
+    if (sessionOpts.chatId) {
+      setRunningProcess(sessionOpts.chatId, child);
+    }
 
     let stdout = "";
     let stderr = "";
@@ -369,6 +379,11 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
     });
 
     child.on("close", (code) => {
+      // Clean up process tracking
+      if (sessionOpts.chatId) {
+        runningProcesses.delete(sessionOpts.chatId);
+      }
+
       const exitCodes = {
         0: "success",
         1: "general error",
@@ -429,6 +444,7 @@ const BOT_COMMANDS = [
   { command: "rewind",     description: "Restore to previous checkpoint — TUI" },
   { command: "share",      description: "Share conversation — N/A remotely" },
   { command: "skills",     description: "Browse and manage agent skills" },      // → cmd skills
+  { command: "steer",      description: "Give mid-session steer: /steer <instruction>" },
   { command: "taste",      description: "Manage Taste learning" },               // → cmd taste
   { command: "terminalsetup", description: "VSCode keybindings — local only" }, // /terminal-setup
   { command: "unshare",    description: "Stop sharing — N/A remotely" },
@@ -456,7 +472,7 @@ const sessions = new Map();
 
 function getSession(chatId) {
   if (!sessions.has(chatId)) {
-    sessions.set(chatId, { active: false, model: null, planMode: false, oneShotPlan: false });
+    sessions.set(chatId, { active: false, model: null, planMode: false, oneShotPlan: false, steer: null });
   }
   return sessions.get(chatId);
 }
@@ -464,6 +480,61 @@ function getSession(chatId) {
 /** Reset a single user's session state — /clear */
 function resetSession(chatId) {
   sessions.delete(chatId);
+  messageQueues.delete(chatId);
+}
+
+// ── Per-user message queue (non-blocking input like Hermes) ──
+const messageQueues = new Map();  // chatId → { chatId, userMsgId, statusMsgId, prompt }[]
+const processing = new Set();     // Set of chatIds currently processing a message
+
+function enqueueMessage(chatId, userMsgId, statusMsgId, prompt) {
+  if (!messageQueues.has(chatId)) {
+    messageQueues.set(chatId, []);
+  }
+  messageQueues.get(chatId).push({ chatId, userMsgId, statusMsgId, prompt });
+  // Acknowledge immediately
+  setReaction(chatId, userMsgId, "⏳").catch(() => {});
+  processQueue(chatId);
+}
+
+async function processQueue(chatId) {
+  if (processing.has(chatId)) return;
+  processing.add(chatId);
+
+  try {
+    while (messageQueues.get(chatId)?.length > 0) {
+      const { chatId, userMsgId, statusMsgId, prompt } = messageQueues.get(chatId).shift();
+      const state = getSession(chatId);
+      await processPrompt(chatId, userMsgId, statusMsgId, prompt, state);
+    }
+  } catch (err) {
+    console.error(`[queue] Error processing for ${chatId}:`, err.message);
+  } finally {
+    processing.delete(chatId);
+  }
+}
+
+// Per-user running process tracking — supports interrupting running commands
+const runningProcesses = new Map();
+
+function getRunningProcess(chatId) {
+  return runningProcesses.get(chatId) || null;
+}
+
+function setRunningProcess(chatId, child) {
+  runningProcesses.set(chatId, child);
+}
+
+function killRunningProcess(chatId) {
+  const child = runningProcesses.get(chatId);
+  if (child && !child.killed) {
+    child.kill("SIGINT");
+    // Force kill after 3s if it didn't stop
+    setTimeout(() => {
+      if (!child.killed) child.kill("SIGKILL");
+    }, 3000);
+  }
+  runningProcesses.delete(chatId);
 }
 
 /**
@@ -554,30 +625,35 @@ async function handleCommand(chatId, text) {
     try {
       const { stdout: whoami } = await runCLI(["whoami"]);
       const { stdout: version } = await runCLI(["--version"]);
+
+      // Get actual model name — custom override or parse default from --list-models
+      let modelName = state.model;
+      if (!modelName) {
+        const { stdout: models } = await runCLI(["--list-models"], 10_000);
+        const m = models?.match(/^(\S+)\s+.+\(default\)/m);
+        modelName = m ? m[1] : "unknown";
+      }
+
       const sessionInfo = state.active
-        ? "Session: active (use `/resume` to continue, `/clear` to reset)"
-        : "Session: none (send a prompt to start)";
+        ? "Session: active (`/resume` to continue, `/clear` to reset)"
+        : "Session: none (send any prompt to start)";
 
-      const modelInfo = state.model
-        ? "Model: `" + escapeMd(state.model) + "` (use `/model` to switch)"
-        : "Model: default (use `/model` to switch)";
+      const planInfo = state.planMode ? "Plan mode: ON" : "Plan mode: off";
 
-      const planInfo = state.planMode
-        ? "Plan mode: ON (use `/plan` to toggle)"
-        : "Plan mode: off (use `/plan` to toggle)";
+      const steerInfo = state.steer
+        ? "Steer: " + escapeMd(state.steer.slice(0, 60)) + (state.steer.length > 60 ? "…" : "")
+        : "No steer set";
 
-      const binCode = "`" + escapeMd(CMD_BIN) + "`";
       await sendMessage(
         chatId,
-        `🔧 *Command Code Status*\n` +
-        `  Binary: ${binCode}\n` +
-        `  Version: ${escapeMd(version || "unknown")}\n` +
-        `  Auth: ${escapeMd(whoami || "unknown")}\n` +
-        `  ${modelInfo}\n` +
-        `  ${planInfo}\n` +
-        `  ${escapeMd(sessionInfo)}\n` +
-        `  YOLO: ${process.env.COMMAND_CODE_YOLO !== "false" ? "on" : "off"}\n` +
-        `  Max turns: ${Number(process.env.COMMAND_CODE_MAX_TURNS) || 20}`
+        `╔══ *Command Code* ══\n` +
+        `╟ Model: \`${escapeMd(modelName)}\`${state.model ? "" : " \\(default\\)"}\n` +
+        `╟ Binary: \`${escapeMd(CMD_BIN)}\` v${escapeMd(version || "?")}\n` +
+        `╟ Auth: ${escapeMd(whoami || "not logged in")}\n` +
+        `╟ ${escapeMd(sessionInfo)}\n` +
+        `╟ Plan: ${planInfo} · YOLO: ${process.env.COMMAND_CODE_YOLO !== "false" ? "on" : "off"} · Turns: ${Number(process.env.COMMAND_CODE_MAX_TURNS) || 20}\n` +
+        `╟ ${steerInfo}\n` +
+        `╚══ Use \`/model\` to switch, \`/steer <msg>\` to guide, \`/clear\` to reset`
       );
     } catch (err) {
       await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
@@ -627,9 +703,15 @@ async function handleCommand(chatId, text) {
       const { stdout } = await runCLI(["--list-models"], 15_000);
       const models = stdout || "Run `cmd --list-models` locally";
       const preview = models.length > 3500 ? models.slice(0, 3500) + "\n...(truncated)" : models;
+
+      // Extract the default model from the listing (line with "(default)")
+      let defaultModel = "unknown";
+      const defaultMatch = stdout?.match(/^(\S+)\s+.+\(default\)/m);
+      if (defaultMatch) defaultModel = defaultMatch[1];
+
       const current = state.model
         ? "\n*Currently selected:* `" + escapeMd(state.model) + "`\n"
-        : "\n*Using default model.*\n";
+        : "\n*Default model:* `" + escapeMd(defaultModel) + "`\n";
       await sendMessage(
         chatId,
         "🤖 *Available models*\n\n```\n" + escapeMd(preview) + "\n```\n" +
@@ -672,6 +754,28 @@ async function handleCommand(chatId, text) {
     } catch (err) {
       await sendMessage(chatId, escapeMd(`❌ ${err.message}`));
     }
+    return true;
+  }
+
+  // ── /steer ──
+  if (ccSlash === "/steer") {
+    const state = getSession(chatId);
+    if (!args) {
+      // /steer (no args) → show current steer
+      if (state.steer) {
+        await sendMessage(chatId, `🧭 *Current steer:*\n\n${escapeMd(state.steer)}\n\n_Use \`/steer clear\` to remove it._`);
+      } else {
+        await sendMessage(chatId, "🧭 *No steer set.*\n\nUse `/steer <instruction>` to guide the AI's behavior mid-session.");
+      }
+      return true;
+    }
+    if (args.toLowerCase() === "clear") {
+      state.steer = null;
+      await sendMessage(chatId, "🧭 Steer cleared.");
+      return true;
+    }
+    state.steer = args;
+    await sendMessage(chatId, `🧭 Steer set.\n\n${escapeMd(args)}\n\nIt will be applied to all subsequent prompts. Use \`/steer clear\` to remove it.`);
     return true;
   }
 
@@ -746,10 +850,13 @@ async function processPrompt(chatId, userMsgId, statusMsgId, prompt, state) {
     // Progress step 1: thinking
     await editMessage(chatId, statusMsgId, `🤔 *Processing:* ${escapeMd(prompt.slice(0, 100))}...`);
 
+    // Prepend steer instruction if set
+    const finalPrompt = state.steer ? `${state.steer}\n\n${prompt}` : prompt;
+
     const result = await runCommandCode(
-      prompt,
+      finalPrompt,
       process.env.HOME,
-      { model: state.model, planMode: state.planMode, continue: state.active }
+      { model: state.model, planMode: state.planMode, continue: state.active, chatId }
     );
     state.active = true;
     if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
@@ -899,12 +1006,10 @@ async function poll() {
 
       // If media was received, handle it as a prompt
       if (mediaPrompt) {
-        const state = getSession(chatId);
         const initialMsg = await sendMessage(chatId, `🚀 ${mediaDesc}: processing...`);
         const statusMsgId = initialMsg?.message_id || initialMsg?.result?.message_id;
         if (statusMsgId && msg.message_id) {
-          await processPrompt(chatId, msg.message_id, statusMsgId, mediaPrompt, state);
-          console.log(`✅ Completed ${mediaDesc} from ${username}`);
+          enqueueMessage(chatId, msg.message_id, statusMsgId, mediaPrompt);
         }
         continue;
       }
@@ -921,12 +1026,10 @@ async function poll() {
         if (text.startsWith("/cmd ")) {
           const prompt = text.slice(5).trim();
           if (!prompt) continue;
-          const state = getSession(chatId);
           const initialMsg = await sendMessage(chatId, `🚀 Running: \`${escapeMd(prompt.slice(0, 200))}\``);
           const statusMsgId = initialMsg?.message_id || initialMsg?.result?.message_id;
           if (statusMsgId && msg.message_id) {
-            await processPrompt(chatId, msg.message_id, statusMsgId, prompt, state);
-            console.log(`✅ Completed /cmd from ${username}`);
+            enqueueMessage(chatId, msg.message_id, statusMsgId, prompt);
           }
           continue;
         }
@@ -934,12 +1037,10 @@ async function poll() {
       }
 
       // ── Regular prompt ──
-      const state = getSession(chatId);
       const initialMsg = await sendMessage(chatId, `🚀 Running: \`${escapeMd(text.slice(0, 200))}\``);
       const statusMsgId = initialMsg?.message_id || initialMsg?.result?.message_id;
       if (statusMsgId && msg.message_id) {
-        await processPrompt(chatId, msg.message_id, statusMsgId, text, state);
-        console.log(`✅ Completed prompt from ${username}`);
+        enqueueMessage(chatId, msg.message_id, statusMsgId, text);
       }
     }
   } catch (err) {
