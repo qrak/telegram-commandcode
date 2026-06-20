@@ -30,21 +30,29 @@ Control Command Code from Telegram like you're sitting at the terminal.
 
 ```bash
 # 1. Get bot token from @BotFather
-# 2. Start the daemon
-TELEGRAM_BOT_TOKEN=*** \
-TELEGRAM_ALLOWED_USERS=any \
-node bot.js
+# 2. Create .env file (or export TELEGRAM_BOT_TOKEN)
+# 3. Start the daemon
+TELEGRAM_ALLOWED_USERS=any node bot.js
+```
+
+Or via npx:
+```bash
+TELEGRAM_ALLOWED_USERS=any npx telegram-commandcode-bot
 ```
 
 ### Env vars
 
 | Variable | Default | Description |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from @BotFather |
+| `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from @BotFather (or `.env` file) |
 | `TELEGRAM_ALLOWED_USERS` | `any` | Comma-separated user IDs for access control |
 | `COMMAND_CODE_CMD` | `cmd` | Path to Command Code binary |
 | `COMMAND_CODE_YOLO` | `true` | `false` → read-only mode (no file writes/shell) |
 | `COMMAND_CODE_MAX_TURNS` | `20` | Max conversation turns per prompt |
+
+Both `index.js` and `bot.js` auto-load `TELEGRAM_BOT_TOKEN` from a `.env` file in the current directory or script directory — no need to export it manually.
+
+The daemon supports **multiple concurrent users** — each user gets their own session state (model selection, plan mode, conversation context).
 
 ### Slash Commands
 
@@ -131,10 +139,11 @@ cmd mcp add telegram \
 
 | Tool | What it does |
 |---|---|
-| `telegram_send_message` | Send a text message (MarkdownV2 or HTML) |
+| `telegram_send_message` | Send a text message (MarkdownV2 or HTML, auto-fallback to plain text on parse error) |
 | `telegram_send_photo` | Send a photo (URL or local file) |
 | `telegram_send_file` | Send any file/document |
-| `telegram_get_updates` | Read recent incoming messages |
+| `telegram_get_updates` | Read recent incoming messages (with offset tracking — no duplicates) |
+| `telegram_health` | Check bot connection: name, username, status |
 
 ### Usage
 
@@ -177,16 +186,24 @@ git clone https://github.com/qrak/telegram-commandcode.git
 cd telegram-commandcode
 npm install
 
+# Optional: create .env from template
+cp .env.example .env
+# Edit .env with your TELEGRAM_BOT_TOKEN
+
 # Bot daemon
-TELEGRAM_BOT_TOKEN=*** node bot.js
+TELEGRAM_ALLOWED_USERS=any node bot.js
 
 # MCP server (for Command Code registration)
 TELEGRAM_BOT_TOKEN=*** node index.js
 ```
 
-Or via npx (for MCP mode):
+Or via npx (without cloning):
 ```bash
-cmd mcp add telegram -e TELEGRAM_BOT_TOKEN=*** -- npx github:qrak/telegram-commandcode
+# Bot daemon (Telegram → Command Code)
+TELEGRAM_ALLOWED_USERS=any npx telegram-commandcode-bot
+
+# MCP server (Command Code → Telegram)
+cmd mcp add telegram -e TELEGRAM_BOT_TOKEN=*** -- npx telegram-commandcode
 ```
 
 ---
@@ -201,6 +218,8 @@ cmd mcp add telegram -e TELEGRAM_BOT_TOKEN=*** -- npx github:qrak/telegram-comma
 | Session context lost | Use `/resume` (not `/clear`) to keep context between messages |
 | File not found (MCP) | Use absolute paths. For project files: `/home/user/project/file.pdf` |
 | Exit code 3 (auth) | Run `cmd login` on the machine first |
+| Messages fail to send (MCP) | Check Telegram API limits. Retries with exponential backoff on 429/502/503 |
+| Markdown formatting broken | Messages auto-fallback to plain text if Telegram rejects malformed formatting |
 
 ## License
 
