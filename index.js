@@ -12,9 +12,10 @@
  * @see https://commandcode.ai/docs/mcp
  */
 
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
@@ -190,6 +191,44 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {},
+    },
+  },
+  {
+    name: "telegram_send_reaction",
+    description:
+      "Set an emoji reaction on a Telegram message. Useful for showing visual feedback (👀 processing, ✅ success, ❌ error).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat_id: {
+          type: "string",
+          description: `Target chat ID. Default: ${DEFAULT_CHAT_ID || "(none configured)"}`,
+        },
+        message_id: {
+          type: "number",
+          description: "ID of the message to react to.",
+        },
+        emoji: {
+          type: "string",
+          description: "Emoji to react with (e.g., 👀, ✅, ❌, 👍, ❤️, 🔄).",
+        },
+      },
+      required: ["chat_id", "message_id", "emoji"],
+    },
+  },
+  {
+    name: "telegram_download_file",
+    description:
+      "Download a file from Telegram by file_id. Useful for processing user-uploaded files. Returns the local path and file metadata.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_id: {
+          type: "string",
+          description: "The file_id from a message (photo, document, voice, etc.).",
+        },
+      },
+      required: ["file_id"],
     },
   },
 ];
@@ -403,6 +442,49 @@ server.setRequestHandler("tools/call", async (req) => {
             {
               type: "text",
               text: `✅ Bot connected: @${me.username} (${me.first_name})\nID: ${me.id}\nCan read messages: ${me.can_read_all_group_messages || false}\nSupports inline: ${me.supports_inline_queries || false}`,
+            },
+          ],
+        };
+      }
+
+      // ---- send_reaction ----
+      case "telegram_send_reaction": {
+        await api("setMessageReaction", {
+          chat_id: args.chat_id,
+          message_id: args.message_id,
+          reaction: [{ type: "emoji", emoji: args.emoji }],
+          is_big: false,
+        });
+        return {
+          content: [{ type: "text", text: `✅ Reaction ${args.emoji} set on message ${args.message_id}` }],
+        };
+      }
+
+      // ---- download_file ----
+      case "telegram_download_file": {
+        const DOWNLOAD_DIR = join(tmpdir(), "telegram-cmd-mcp");
+        if (!existsSync(DOWNLOAD_DIR)) mkdirSync(DOWNLOAD_DIR, { recursive: true });
+
+        const fileInfo = await api("getFile", { file_id: args.file_id });
+        if (!fileInfo || !fileInfo.file_path) {
+          throw new Error("Could not retrieve file info from Telegram");
+        }
+
+        const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Failed to download file: ${res.status}`);
+
+        const buffer = Buffer.from(await res.arrayBuffer());
+        const ext = "." + fileInfo.file_path.split(".").pop();
+        const localName = `${Date.now()}_${args.file_id.slice(0, 8)}${ext}`;
+        const localPath = join(DOWNLOAD_DIR, localName);
+        writeFileSync(localPath, buffer);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `✅ File downloaded\n  Local path: \`${localPath}\`\n  Size: ${buffer.length} bytes\n  Telegram path: ${fileInfo.file_path}`,
             },
           ],
         };

@@ -16,9 +16,10 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -145,6 +146,132 @@ async function sendTyping(chatId) {
 const ESCAPE_RE = /[_*[\]()~`>#+\-=|{}.!]/g;
 function escapeMd(text) {
   return text.replace(ESCAPE_RE, "\\$&");
+}
+
+// ---------------------------------------------------------------------------
+// Reactions — visual feedback for message processing
+// ---------------------------------------------------------------------------
+
+async function setReaction(chatId, messageId, emoji) {
+  return api("setMessageReaction", {
+    chat_id: chatId,
+    message_id: messageId,
+    reaction: [{ type: "emoji", emoji }],
+    is_big: false,
+  }).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Edit message — single-message streaming (edit in place)
+// ---------------------------------------------------------------------------
+
+async function editMessage(chatId, messageId, text, parseMode = "MarkdownV2") {
+  return api("editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: parseMode,
+    link_preview_options: { is_disabled: true },
+  }).catch(async (err) => {
+    if (parseMode === "MarkdownV2" && err.message.includes("can't parse entities")) {
+      return editMessage(chatId, messageId, text, "");
+    }
+    // Message too old to edit — send new one
+    if (err.message.includes("message can't be edited")) {
+      return sendMessage(chatId, text, parseMode);
+    }
+    throw err;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// File download from Telegram
+// ---------------------------------------------------------------------------
+
+const DOWNLOAD_DIR = join(tmpdir(), "telegram-cmd");
+
+function ensureDownloadDir() {
+  if (!existsSync(DOWNLOAD_DIR)) {
+    mkdirSync(DOWNLOAD_DIR, { recursive: true });
+  }
+}
+
+/**
+ * Download a file from Telegram by file_id.
+ * Returns the local file path, or null on failure.
+ */
+async function downloadTelegramFile(fileId, ext = "") {
+  ensureDownloadDir();
+  try {
+    const fileInfo = await api("getFile", { file_id: fileId });
+    if (!fileInfo || !fileInfo.file_path) return null;
+
+    const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const localName = `${Date.now()}_${fileId.slice(0, 8)}${ext || "." + fileInfo.file_path.split(".").pop()}`;
+    const localPath = join(DOWNLOAD_DIR, localName);
+    writeFileSync(localPath, buffer);
+    return localPath;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Voice transcription (OpenAI Whisper API)
+// ---------------------------------------------------------------------------
+
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+
+async function transcribeVoice(filePath) {
+  if (!OPENAI_KEY) return null;
+
+  try {
+    const audio = readFileSync(filePath);
+    const blob = new Blob([audio], { type: "audio/ogg" });
+    const form = new FormData();
+    form.set("file", blob, "voice.ogg");
+    form.set("model", "whisper-1");
+
+    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPENAI_KEY}` },
+      body: form,
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.text || null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// File path detection in command output — for auto-sending files
+// ---------------------------------------------------------------------------
+
+const FILE_PATH_RE = /(\/(?:home|tmp|var|usr|etc|opt|mnt|media|run|srv)[^\s"'\])\]]{3,})/g;
+
+/**
+ * Scan text for file paths that actually exist on disk.
+ * Returns array of { path, type } where type is "photo" or "file".
+ */
+function findFilePaths(text) {
+  const matches = new Set();
+  let m;
+  while ((m = FILE_PATH_RE.exec(text)) !== null) {
+    const p = m[1].replace(/[.,;:!?)]$/, ""); // strip trailing punctuation
+    if (existsSync(p)) {
+      const lower = p.toLowerCase();
+      const isPhoto = /\.(png|jpg|jpeg|gif|webp|bmp)$/.test(lower);
+      matches.add(JSON.stringify({ path: p, type: isPhoto ? "photo" : "file" }));
+    }
+  }
+  return [...matches].map((s) => JSON.parse(s));
 }
 
 // ---------------------------------------------------------------------------
@@ -591,104 +718,212 @@ async function handleCommand(chatId, text) {
 
 let lastUpdateId = 0;
 
+/**
+ * Process a user prompt through Command Code with reactions + single-message editing.
+ * Returns the result text.
+ */
+async function processPrompt(chatId, statusMsgId, prompt, state) {
+  const msgId = statusMsgId;
+  await setReaction(chatId, msgId, "👀");
+
+  try {
+    const result = await runCommandCode(
+      prompt,
+      process.env.HOME,
+      { model: state.model, planMode: state.planMode, continue: state.active }
+    );
+    state.active = true;
+    if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
+
+    // Build final response
+    const escapedResult = result ? escapeMd(result) : "";
+    const doneMsg = result
+      ? `✅ *Done:* ${escapeMd(prompt.slice(0, 100))}\n\n${escapedResult}`
+      : `✅ *Done* \\— ${escapeMd(prompt.slice(0, 100))}`;
+
+    // Edit the initial status message with the final result
+    await editMessage(chatId, msgId, doneMsg);
+
+    // Auto-send files detected in output
+    if (result) {
+      const paths = findFilePaths(result);
+      for (const { path, type } of paths.slice(0, 5)) {
+        try {
+          if (type === "photo") {
+            const form = new FormData();
+            form.set("chat_id", chatId);
+            form.set("photo", new Blob([readFileSync(path)]), path.split("/").pop());
+            await api("sendPhoto", form);
+          } else {
+            const form = new FormData();
+            form.set("chat_id", chatId);
+            form.set("document", new Blob([readFileSync(path)]), path.split("/").pop());
+            await api("sendDocument", form);
+          }
+        } catch { /* best-effort */ }
+      }
+    }
+
+    await setReaction(chatId, msgId, "✅");
+    return result;
+  } catch (err) {
+    await editMessage(chatId, msgId, `❌ *Error:* ${escapeMd(err.message)}`);
+    await setReaction(chatId, msgId, "❌");
+    throw err;
+  }
+}
+
+/**
+ * Check if the bot is @mentioned in a message's entities.
+ */
+function isBotMentioned(msg, botUsername) {
+  if (!msg.entities) return false;
+  const username = botUsername ? botUsername.toLowerCase() : "";
+  if (!username) return true; // can't check — allow
+  return msg.entities.some((e) => {
+    if (e.type !== "mention") return false;
+    const mention = msg.text?.slice(e.offset, e.offset + e.length).toLowerCase();
+    return mention === `@${username}`;
+  });
+}
+
+/**
+ * Check if a message is a reply to one of the bot's own messages.
+ */
+function isReplyToBot(msg, botId) {
+  if (!msg.reply_to_message || !botId) return false;
+  return msg.reply_to_message.from?.id === botId;
+}
+
 async function poll() {
   try {
     const updates = await api("getUpdates", {
       offset: lastUpdateId + 1,
-      timeout: 30, // long polling (30s)
+      timeout: 30,
       allowed_updates: ["message"],
     });
+
+    // Get bot info once per poll cycle for mention/reply checks
+    const botInfo = await api("getMe", {});
+    const botUsername = botInfo.username;
+    const botId = botInfo.id;
 
     for (const update of updates) {
       lastUpdateId = update.update_id;
 
       const msg = update.message;
-      if (!msg || !msg.text) continue;
+      if (!msg) continue;
 
       const chatId = String(msg.chat.id);
+      const chatType = msg.chat.type; // "private", "group", "supergroup"
       const userId = msg.from?.id;
       const username = msg.from?.username || msg.from?.first_name || "unknown";
-      const text = msg.text.trim();
+      const text = (msg.text || msg.caption || "").trim();
 
-      // Ignore empty messages
-      if (!text) continue;
+      // ── Group chat: only respond when @mentioned or replying to bot ──
+      if (chatType === "group" || chatType === "supergroup") {
+        const mentioned = isBotMentioned(msg, botUsername);
+        const replyToBot = isReplyToBot(msg, botId);
+        if (!mentioned && !replyToBot) continue;
+      }
 
-      // Access control
+      // ── Access control ──
       if (!isAllowed(userId)) {
         console.log(`⛔ Blocked message from user ${userId} (${username})`);
         await sendMessage(chatId, escapeMd("⛔ Sorry, you are not authorized to use this bot."));
         continue;
       }
 
-      console.log(`📩 [${username}] ${text.slice(0, 80)}`);
+      console.log(`📩 [${username}] [${chatType}] ${(text || "(media)").slice(0, 80)}`);
 
-      // --- Check if it's a slash command ---
+      // ── Handle media messages (photos, documents, voice) ──
+      let mediaPrompt = null;
+      let mediaDesc = "";
+
+      // Photo
+      if (msg.photo) {
+        const photo = msg.photo[msg.photo.length - 1]; // largest size
+        const localPath = await downloadTelegramFile(photo.file_id, ".jpg");
+        if (localPath) {
+          mediaPrompt = `User sent a photo (saved at ${localPath})${text ? `. Caption: ${text}` : ""}. Review any text visible in the image and respond appropriately.`;
+          mediaDesc = "📷 Photo";
+        }
+      }
+
+      // Document
+      if (msg.document) {
+        const doc = msg.document;
+        const ext = doc.file_name ? "." + doc.file_name.split(".").pop() : "";
+        const localPath = await downloadTelegramFile(doc.file_id, ext);
+        if (localPath) {
+          mediaPrompt = `User sent a file "${doc.file_name || "unnamed"}" (saved at ${localPath})${text ? `. Message: ${text}` : ""}. Read and process the file if needed.`;
+          mediaDesc = "📄 File";
+        }
+      }
+
+      // Voice
+      if (msg.voice) {
+        const voice = msg.voice;
+        const localPath = await downloadTelegramFile(voice.file_id, ".ogg");
+        if (localPath) {
+          const transcription = await transcribeVoice(localPath);
+          if (transcription) {
+            mediaPrompt = `User sent a voice message. Transcription: "${transcription}". Respond to the content.`;
+            mediaDesc = "🎤 Voice";
+          } else {
+            mediaPrompt = `User sent a voice message (saved at ${localPath}). The message could not be transcribed — let the user know.`;
+            mediaDesc = "🎤 Voice (untranscribed)";
+          }
+        }
+      }
+
+      // If media was received, handle it as a prompt
+      if (mediaPrompt) {
+        const state = getSession(chatId);
+        const initialMsg = await sendMessage(chatId, `🚀 ${mediaDesc}: processing...`);
+        const msgId = initialMsg?.message_id || initialMsg?.result?.message_id;
+        if (msgId) {
+          await processPrompt(chatId, msgId, mediaPrompt, state);
+          console.log(`✅ Completed ${mediaDesc} from ${username}`);
+        }
+        continue;
+      }
+
+      // ── Text messages only from here ──
+      if (!text) continue;
+
+      // ── Slash commands ──
       if (text.startsWith("/")) {
         const handled = await handleCommand(chatId, text);
         if (handled) continue;
-        // /cmd with args: strip the /cmd prefix and run the prompt
+
+        // /cmd with args — treat as prompt
         if (text.startsWith("/cmd ")) {
           const prompt = text.slice(5).trim();
           if (!prompt) continue;
           const state = getSession(chatId);
-          // Don't return — fall through to the regular prompt handler below
-          // But skip the "/cmd" echo — show the actual prompt instead
-          await sendTyping(chatId);
-          await sendMessage(chatId, `🚀 Running: \`${escapeMd(prompt.slice(0, 200))}\``);
-          try {
-            const result = await runCommandCode(
-              prompt,
-              process.env.HOME,
-              { model: state.model, planMode: state.planMode, continue: state.active }
-            );
-            state.active = true;
-            // Reset one-shot plan mode after execution
-            if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
-            const finalText = result
-              ? `✅ *Done:* ${escapeMd(prompt.slice(0, 100))}\n\n${escapeMd(result)}`
-              : `✅ *Done* \\— ${escapeMd(prompt.slice(0, 100))}`;
-            await sendMessage(chatId, finalText);
+          const initialMsg = await sendMessage(chatId, `🚀 Running: \`${escapeMd(prompt.slice(0, 200))}\``);
+          const msgId = initialMsg?.message_id || initialMsg?.result?.message_id;
+          if (msgId) {
+            await processPrompt(chatId, msgId, prompt, state);
             console.log(`✅ Completed /cmd from ${username}`);
-          } catch (err) {
-            await sendMessage(chatId, escapeMd(`❌ Error: ${err.message}`));
-            console.error(`❌ Error for ${username}:`, err.message);
           }
           continue;
         }
         continue;
       }
 
-      // --- Regular prompt → forward to Command Code ---
+      // ── Regular prompt ──
       const state = getSession(chatId);
-      await sendTyping(chatId);
-
-      await sendMessage(
-        chatId,
-        `🚀 Running: \`${escapeMd(text.slice(0, 200))}\``
-      );
-
-      try {
-        const result = await runCommandCode(
-          text,
-          process.env.HOME,
-          { model: state.model, planMode: state.planMode, continue: state.active }
-        );
-        state.active = true;
-        // Reset one-shot plan mode after execution
-        if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
-        const finalText = result
-          ? `✅ *Done:* ${escapeMd(text.slice(0, 100))}\n\n${escapeMd(result)}`
-          : `✅ *Done* \\— ${escapeMd(text.slice(0, 100))}`;
-        await sendMessage(chatId, finalText);
+      const initialMsg = await sendMessage(chatId, `🚀 Running: \`${escapeMd(text.slice(0, 200))}\``);
+      const msgId = initialMsg?.message_id || initialMsg?.result?.message_id;
+      if (msgId) {
+        await processPrompt(chatId, msgId, text, state);
         console.log(`✅ Completed prompt from ${username}`);
-      } catch (err) {
-        await sendMessage(chatId, escapeMd(`❌ Error: ${err.message}`));
-        console.error(`❌ Error for ${username}:`, err.message);
       }
     }
   } catch (err) {
     console.error("Poll error:", err.message);
-    // Wait before retrying on error
     await new Promise((r) => setTimeout(r, 5000));
   }
 }

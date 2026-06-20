@@ -49,10 +49,24 @@ TELEGRAM_ALLOWED_USERS=any npx telegram-commandcode-bot
 | `COMMAND_CODE_CMD` | `cmd` | Path to Command Code binary |
 | `COMMAND_CODE_YOLO` | `true` | `false` → read-only mode (no file writes/shell) |
 | `COMMAND_CODE_MAX_TURNS` | `20` | Max conversation turns per prompt |
+| `OPENAI_API_KEY` | *(optional)* | Required for voice message transcription (Whisper API) |
 
 Both `index.js` and `bot.js` auto-load `TELEGRAM_BOT_TOKEN` from a `.env` file in the current directory or script directory — no need to export it manually.
 
 The daemon supports **multiple concurrent users** — each user gets their own session state (model selection, plan mode, conversation context).
+
+### Features
+
+| Feature | Description |
+|---|---|
+| **👀 Reactions** | Bot reacts with 👀 while processing, ✅ on success, ❌ on error |
+| **📷 Photo reception** | Send photos to the bot — they're downloaded and the path is passed to `cmd` |
+| **📄 File reception** | Send documents — same flow, downloaded to `/tmp/telegram-cmd/` |
+| **🎤 Voice transcription** | Voice messages transcribed via OpenAI Whisper (requires `OPENAI_API_KEY`) |
+| **📎 Auto-send files** | File paths in `cmd` output are automatically uploaded as Telegram attachments |
+| **👥 Group chat** | Bot responds when @mentioned or replied to in groups |
+| **✏️ Single-message editing** | Status message is edited in-place with the final result — no chat clutter |
+| **🔄 Session chaining** | `/resume` continues previous context, `/clear` starts fresh |
 
 ### Slash Commands
 
@@ -114,11 +128,13 @@ Bot:             🔧 Command Code Status
 ### How it works
 
 1. Daemon polls Telegram via `getUpdates` (long polling, 30s timeout)
-2. Incoming message → `cmd -p "prompt" --yolo --max-turns 20`
-3. `cmd -p` runs headless (non-interactive), outputs response to stdout
-4. Response sent back to Telegram (auto-split for long messages)
-5. Session chaining via `cmd -p --continue` (context preserved between messages)
-6. `/clear` drops `--continue` → fresh session
+2. Incoming message → bot adds 👀 reaction, sends a status message
+3. `cmd -p "prompt" --yolo --max-turns 20` runs headless
+4. Status message is **edited in place** with the final result (no duplicate messages)
+5. Reaction changes to ✅ (success) or ❌ (error)
+6. File paths detected in output are auto-sent as Telegram attachments
+7. Session chaining via `cmd -p --continue` (context preserved between messages)
+8. `/clear` drops `--continue` → fresh session
 
 ---
 
@@ -143,6 +159,8 @@ cmd mcp add telegram \
 | `telegram_send_photo` | Send a photo (URL or local file) |
 | `telegram_send_file` | Send any file/document |
 | `telegram_get_updates` | Read recent incoming messages (with offset tracking — no duplicates) |
+| `telegram_send_reaction` | Set emoji reaction on a message (👀 ✅ ❌ 👍 ❤️) |
+| `telegram_download_file` | Download a file from Telegram by file_id, returns local path |
 | `telegram_health` | Check bot connection: name, username, status |
 
 ### Usage
