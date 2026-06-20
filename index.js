@@ -12,7 +12,7 @@
  * @see https://commandcode.ai/docs/mcp
  */
 
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -52,6 +52,9 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const DEFAULT_CHAT_ID = process.env.TELEGRAM_DEFAULT_CHAT_ID || "";
 
+// Track last seen update_id so get_updates acknowledges updates
+let _lastUpdateId = 0;
+
 // ---------------------------------------------------------------------------
 // Telegram API helpers
 // ---------------------------------------------------------------------------
@@ -59,18 +62,27 @@ const DEFAULT_CHAT_ID = process.env.TELEGRAM_DEFAULT_CHAT_ID || "";
 async function api(method, body) {
   const url = `${API_BASE}/${method}`;
   const isFormData = body instanceof FormData;
+  const maxRetries = 3;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: isFormData ? {} : { "Content-Type": "application/json" },
-    body: isFormData ? body : JSON.stringify(body),
-  });
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: isFormData ? {} : { "Content-Type": "application/json" },
+      body: isFormData ? body : JSON.stringify(body),
+    });
 
-  const data = await res.json();
-  if (!data.ok) {
+    const data = await res.json();
+    if (data.ok) return data.result;
+
+    // Retry on 429 (rate limit), 502/503 (server errors)
+    if ((res.status === 429 || res.status === 502 || res.status === 503) && attempt < maxRetries) {
+      const delay = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 10000);
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+
     throw new Error(`Telegram API error: ${data.description} (code ${data.error_code})`);
   }
-  return data.result;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +168,7 @@ const TOOLS = [
   {
     name: "telegram_get_updates",
     description:
-      "Get recent messages/updates from the bot. Useful for checking if someone sent a command. Returns the 5 most recent updates (newest first).",
+      "Get recent messages/updates from the bot. Useful for checking if someone sent a command. Returns the most recent updates (newest first). Updates are acknowledged — subsequent calls return newer messages.",
     inputSchema: {
       type: "object",
       properties: {
@@ -164,7 +176,20 @@ const TOOLS = [
           type: "number",
           description: "Max updates to return (default: 5, max: 20).",
         },
+        offset: {
+          type: "number",
+          description: "Update ID offset. Omit to auto-acknowledge (get only new updates). Set to 0 to re-read pending updates.",
+        },
       },
+    },
+  },
+  {
+    name: "telegram_health",
+    description:
+      "Check if the Telegram bot is connected and responding. Returns bot name, username, and connection status.",
+    inputSchema: {
+      type: "object",
+      properties: {},
     },
   },
 ];
@@ -334,12 +359,22 @@ server.setRequestHandler("tools/call", async (req) => {
       // ---- get_updates ----
       case "telegram_get_updates": {
         const limit = Math.min(args.limit || 5, 20);
-        const updates = await api("getUpdates", { limit, offset: -1 });
+        // When offset is provided explicitly, use it;
+        // otherwise auto-advance from internal tracker (acknowledging seen updates)
+        const offset = args.offset !== undefined ? args.offset : _lastUpdateId + 1;
+        const updates = await api("getUpdates", { limit, offset, timeout: 10 });
 
         if (!updates || updates.length === 0) {
           return {
             content: [{ type: "text", text: "📭 No recent messages." }],
           };
+        }
+
+        // Advance tracker past the highest update_id we just saw
+        for (const u of updates) {
+          if (u.update_id >= _lastUpdateId) {
+            _lastUpdateId = u.update_id;
+          }
         }
 
         const lines = updates.map((u) => {
@@ -354,7 +389,20 @@ server.setRequestHandler("tools/call", async (req) => {
           content: [
             {
               type: "text",
-              text: `📬 Last ${updates.length} update(s):\n${lines.map((l) => `  • ${l}`).join("\n")}`,
+              text: `📬 ${updates.length} update(s):\n${lines.map((l) => `  • ${l}`).join("\n")}`,
+            },
+          ],
+        };
+      }
+
+      // ---- health ----
+      case "telegram_health": {
+        const me = await api("getMe", {});
+        return {
+          content: [
+            {
+              type: "text",
+              text: `✅ Bot connected: @${me.username} (${me.first_name})\nID: ${me.id}\nCan read messages: ${me.can_read_all_group_messages || false}\nSupports inline: ${me.supports_inline_queries || false}`,
             },
           ],
         };

@@ -13,14 +13,39 @@
  *   Options (env vars):
  *     TELEGRAM_ALLOWED_USERS  — comma-separated list of user IDs (or "any")
  *     COMMAND_CODE_CMD        — path to the `cmd` binary (default: "cmd")
- *     TELEGRAM_DEFAULT_CHAT   — fallback chat ID for outgoing messages
  */
 
 import { spawn } from "node:child_process";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
+
+// ---------------------------------------------------------------------------
+// Load .env if TELEGRAM_BOT_TOKEN not already set
+// ---------------------------------------------------------------------------
+
+function loadEnv() {
+  if (process.env.TELEGRAM_BOT_TOKEN) return;
+  const envPaths = [
+    resolve(process.cwd(), ".env"),
+    resolve(__dirname, ".env"),
+  ];
+  for (const p of envPaths) {
+    if (existsSync(p)) {
+      const lines = readFileSync(p, "utf8").split(/\r?\n/);
+      for (const line of lines) {
+        const m = line.match(/^TELEGRAM_BOT_TOKEN=(.*)/);
+        if (m) {
+          process.env.TELEGRAM_BOT_TOKEN = m[1].trim().replace(/^["']|["']$/g, "");
+          return;
+        }
+      }
+    }
+  }
+}
+loadEnv();
 
 // ---------------------------------------------------------------------------
 // Config
@@ -29,6 +54,7 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
   console.error("❌ TELEGRAM_BOT_TOKEN is required. Create a bot at @BotFather.");
+  console.error("   Set via env var, or create a .env file with: TELEGRAM_BOT_TOKEN=your_token_here");
   process.exit(1);
 }
 
@@ -47,28 +73,53 @@ const ALLOWED = (process.env.TELEGRAM_ALLOWED_USERS || "any")
 async function api(method, body) {
   const url = `${API_BASE}/${method}`;
   const isForm = body instanceof FormData;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: isForm ? {} : { "Content-Type": "application/json" },
-    body: isForm ? body : JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Telegram API ${method}: ${res.status} ${err}`);
+  const maxRetries = 3;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: isForm ? {} : { "Content-Type": "application/json" },
+      body: isForm ? body : JSON.stringify(body),
+    });
+
+    if (res.ok) {
+      return (await res.json()).result;
+    }
+
+    const errText = await res.text();
+
+    // Retry on 429 (rate limit), 502 (bad gateway), 503 (service unavailable)
+    if ((res.status === 429 || res.status === 502 || res.status === 503) && attempt < maxRetries) {
+      const delay = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 10000);
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+
+    throw new Error(`Telegram API ${method}: ${res.status} ${errText}`);
   }
-  return (await res.json()).result;
 }
 
-async function sendMessage(chatId, text) {
+async function sendMessage(chatId, text, parseMode = "MarkdownV2") {
   // Split long messages (Telegram limit: 4096 chars)
   const maxLen = 4000;
-  if (text.length <= maxLen) {
+
+  async function send(text, pm) {
     return api("sendMessage", {
       chat_id: chatId,
       text,
-      parse_mode: "MarkdownV2",
+      parse_mode: pm,
       link_preview_options: { is_disabled: true },
+    }).catch(async (err) => {
+      // If MarkdownV2 parse fails, fall back to plain text
+      if (pm === "MarkdownV2" && err.message.includes("can't parse entities")) {
+        return send(text, "");
+      }
+      throw err;
     });
+  }
+
+  if (text.length <= maxLen) {
+    return send(text, parseMode);
   }
 
   // Send in chunks
@@ -77,11 +128,8 @@ async function sendMessage(chatId, text) {
     chunks.push(text.slice(i, i + maxLen));
   }
   for (let i = 0; i < chunks.length; i++) {
-    await api("sendMessage", {
-      chat_id: chatId,
-      text: `\\(${i + 1}/${chunks.length}\\)\n${chunks[i]}`,
-      parse_mode: "MarkdownV2",
-    });
+    const header = `\\(${i + 1}/${chunks.length}\\)\n`;
+    await send(header + chunks[i], parseMode);
   }
   return { message_id: "chunked" };
 }
@@ -139,12 +187,12 @@ async function runCommandCode(prompt, cwd = process.env.HOME, sessionOpts = {}) 
   args.push("--max-turns", String(maxTurns));
 
   // Model override — if user selected a model via /model
-  if (selectedModel) {
-    args.push("-m", selectedModel);
+  if (sessionOpts.model) {
+    args.push("-m", sessionOpts.model);
   }
 
   // Plan mode — if user enabled via /plan
-  if (planMode) {
+  if (sessionOpts.planMode) {
     args.push("--plan");
   }
 
@@ -260,13 +308,20 @@ async function registerCommands() {
   }
 }
 
-// Session tracking
-let sessionActive = false;
-// Model tracking — persists across prompts
-let selectedModel = null; // e.g. "claude-sonnet-4-6" or null (use default)
-// Plan mode tracking
-let planMode = false;
-let oneShotPlan = false; // true when /plan <task> — reset after one prompt
+// Per-user session state (supports concurrent users)
+const sessions = new Map();
+
+function getSession(chatId) {
+  if (!sessions.has(chatId)) {
+    sessions.set(chatId, { active: false, model: null, planMode: false, oneShotPlan: false });
+  }
+  return sessions.get(chatId);
+}
+
+/** Reset a single user's session state — /clear */
+function resetSession(chatId) {
+  sessions.delete(chatId);
+}
 
 /**
  * Run a CLI subcommand and return its stdout (or error message).
@@ -351,19 +406,20 @@ async function handleCommand(chatId, text) {
 
   // ── /status ──
   if (ccSlash === "/status") {
+    const state = getSession(chatId);
     await sendTyping(chatId);
     try {
       const { stdout: whoami } = await runCLI(["whoami"]);
       const { stdout: version } = await runCLI(["--version"]);
-      const sessionInfo = sessionActive
+      const sessionInfo = state.active
         ? "Session: active (use `/resume` to continue, `/clear` to reset)"
         : "Session: none (send a prompt to start)";
 
-      const modelInfo = selectedModel
-        ? "Model: `" + escapeMd(selectedModel) + "` (use `/model` to switch)"
+      const modelInfo = state.model
+        ? "Model: `" + escapeMd(state.model) + "` (use `/model` to switch)"
         : "Model: default (use `/model` to switch)";
 
-      const planInfo = planMode
+      const planInfo = state.planMode
         ? "Plan mode: ON (use `/plan` to toggle)"
         : "Plan mode: off (use `/plan` to toggle)";
 
@@ -388,14 +444,15 @@ async function handleCommand(chatId, text) {
 
   // ── /resume ──
   if (ccSlash === "/resume") {
-    sessionActive = true;
+    const state = getSession(chatId);
+    state.active = true;
     await sendTyping(chatId);
     await sendMessage(chatId, "🔄 Resuming last headless session...");
     try {
       const result = await runCommandCode(
         "Continue where we left off. Summarize context and ask what I'd like to do next.",
         process.env.HOME,
-        { continue: true }
+        { continue: true, model: state.model, planMode: state.planMode }
       );
       await sendMessage(chatId, `📋 *Session resumed:*\n${escapeMd(result)}`);
     } catch (err) {
@@ -406,18 +463,17 @@ async function handleCommand(chatId, text) {
 
   // ── /clear ──
   if (ccSlash === "/clear") {
-    sessionActive = false;
-    planMode = false;
-    selectedModel = null;
+    resetSession(chatId);
     await sendMessage(chatId, "🧹 Session cleared. Model reset to default, plan mode off. Next prompt starts fresh.");
     return true;
   }
 
   // ── /model ──
   if (ccSlash === "/model") {
+    const state = getSession(chatId);
     // /model <name> → switch to that model
     if (args) {
-      selectedModel = args;
+      state.model = args;
       await sendMessage(chatId, `✅ Switched to model: *${escapeMd(args)}*\n\nNext prompts will use \`-m ${escapeMd(args)}\`.`);
       return true;
     }
@@ -428,8 +484,8 @@ async function handleCommand(chatId, text) {
       const { stdout } = await runCLI(["--list-models"], 15_000);
       const models = stdout || "Run `cmd --list-models` locally";
       const preview = models.length > 3500 ? models.slice(0, 3500) + "\n...(truncated)" : models;
-      const current = selectedModel
-        ? "\n*Currently selected:* `" + escapeMd(selectedModel) + "`\n"
+      const current = state.model
+        ? "\n*Currently selected:* `" + escapeMd(state.model) + "`\n"
         : "\n*Using default model.*\n";
       await sendMessage(
         chatId,
@@ -445,17 +501,18 @@ async function handleCommand(chatId, text) {
 
   // ── /plan ──
   if (ccSlash === "/plan") {
+    const state = getSession(chatId);
     if (args) {
       // /plan <task> → run the task in plan mode once
-      planMode = true;
-      oneShotPlan = true;
+      state.planMode = true;
+      state.oneShotPlan = true;
       return false; // fall through to prompt execution
     }
-    planMode = !planMode;
-    oneShotPlan = false;
-    const status = planMode ? "ON ✅" : "OFF ❌";
+    state.planMode = !state.planMode;
+    state.oneShotPlan = false;
+    const status = state.planMode ? "ON ✅" : "OFF ❌";
     await sendMessage(chatId, `📋 Plan mode: *${status}*\n\n` +
-      (planMode
+      (state.planMode
         ? "Next prompts will run with `--plan`. Use `/plan` again to disable.\n_Or use `/plan <task>` for a one-shot plan._"
         : "Next prompts will run in normal mode."));
     return true;
@@ -573,21 +630,22 @@ async function poll() {
         if (text.startsWith("/cmd ")) {
           const prompt = text.slice(5).trim();
           if (!prompt) continue;
+          const state = getSession(chatId);
           // Don't return — fall through to the regular prompt handler below
           // But skip the "/cmd" echo — show the actual prompt instead
           await sendTyping(chatId);
-          await sendMessage(chatId, escapeMd(`🚀 Running: \`${prompt.slice(0, 200)}\``));
+          await sendMessage(chatId, `🚀 Running: \`${escapeMd(prompt.slice(0, 200))}\``);
           try {
             const result = await runCommandCode(
               prompt,
               process.env.HOME,
-              sessionActive ? { continue: true } : {}
+              { model: state.model, planMode: state.planMode, continue: state.active }
             );
-            sessionActive = true;
+            state.active = true;
             // Reset one-shot plan mode after execution
-            if (oneShotPlan) { planMode = false; oneShotPlan = false; }
+            if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
             const finalText = result
-              ? `✅ *Done:* ${escapeMd(prompt.slice(0, 100))}\n\n${result}`
+              ? `✅ *Done:* ${escapeMd(prompt.slice(0, 100))}\n\n${escapeMd(result)}`
               : `✅ *Done* \\— ${escapeMd(prompt.slice(0, 100))}`;
             await sendMessage(chatId, finalText);
             console.log(`✅ Completed /cmd from ${username}`);
@@ -601,24 +659,25 @@ async function poll() {
       }
 
       // --- Regular prompt → forward to Command Code ---
+      const state = getSession(chatId);
       await sendTyping(chatId);
 
       await sendMessage(
         chatId,
-        escapeMd(`🚀 Running: \`${text.slice(0, 200)}\``)
+        `🚀 Running: \`${escapeMd(text.slice(0, 200))}\``
       );
 
       try {
         const result = await runCommandCode(
           text,
           process.env.HOME,
-          sessionActive ? { continue: true } : {}
+          { model: state.model, planMode: state.planMode, continue: state.active }
         );
-        sessionActive = true;
+        state.active = true;
         // Reset one-shot plan mode after execution
-        if (oneShotPlan) { planMode = false; oneShotPlan = false; }
+        if (state.oneShotPlan) { state.planMode = false; state.oneShotPlan = false; }
         const finalText = result
-          ? `✅ *Done:* ${escapeMd(text.slice(0, 100))}\n\n${result}`
+          ? `✅ *Done:* ${escapeMd(text.slice(0, 100))}\n\n${escapeMd(result)}`
           : `✅ *Done* \\— ${escapeMd(text.slice(0, 100))}`;
         await sendMessage(chatId, finalText);
         console.log(`✅ Completed prompt from ${username}`);
@@ -635,10 +694,32 @@ async function poll() {
 }
 
 // ---------------------------------------------------------------------------
+// Graceful shutdown
+// ---------------------------------------------------------------------------
+
+let shuttingDown = false;
+
+function setupShutdown() {
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n${signal} received. Shutting down gracefully...`);
+    // lastUpdateId is already in memory; if we wanted persistence
+    // we could save it, but for a daemon restarting is fine.
+    process.exit(0);
+  };
+
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main() {
+  setupShutdown();
+
   console.log(`🤖 telegram-commandcode bot starting`);
   console.log(`   Bot: @${(await api("getMe", {})).username}`);
   console.log(`   CMD: ${CMD_BIN}`);
