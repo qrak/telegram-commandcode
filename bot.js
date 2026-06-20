@@ -255,16 +255,32 @@ async function transcribeVoice(filePath) {
 // ---------------------------------------------------------------------------
 
 const FILE_PATH_RE = /(\/(?:home|tmp|var|usr|etc|opt|mnt|media|run|srv)[^\s"'\])\]]{3,})/g;
+const MEDIA_RE = /MEDIA:(\/[^\s"'\])\]]{3,})/g;
 
 /**
  * Scan text for file paths that actually exist on disk.
  * Returns array of { path, type } where type is "photo" or "file".
+ * Supports explicit MEDIA:/path/to/file markers (Hermes-compatible) and
+ * bare absolute paths.
  */
 function findFilePaths(text) {
   const matches = new Set();
+
+  // Check for explicit MEDIA: markers first
   let m;
+  while ((m = MEDIA_RE.exec(text)) !== null) {
+    const p = m[1].replace(/[.,;:!?)]$/, "");
+    if (existsSync(p)) {
+      const lower = p.toLowerCase();
+      const isPhoto = /\.(png|jpg|jpeg|gif|webp|bmp)$/.test(lower);
+      matches.add(JSON.stringify({ path: p, type: isPhoto ? "photo" : "file" }));
+    }
+  }
+
+  // Fallback: scan for bare absolute paths
+  FILE_PATH_RE.lastIndex = 0;
   while ((m = FILE_PATH_RE.exec(text)) !== null) {
-    const p = m[1].replace(/[.,;:!?)]$/, ""); // strip trailing punctuation
+    const p = m[1].replace(/[.,;:!?)]$/, "");
     if (existsSync(p)) {
       const lower = p.toLowerCase();
       const isPhoto = /\.(png|jpg|jpeg|gif|webp|bmp)$/.test(lower);
@@ -720,13 +736,16 @@ let lastUpdateId = 0;
 
 /**
  * Process a user prompt through Command Code with reactions + single-message editing.
- * Returns the result text.
+ * Reacts to the user's original message (like Hermes), edits status message in-place.
  */
-async function processPrompt(chatId, statusMsgId, prompt, state) {
-  const msgId = statusMsgId;
-  await setReaction(chatId, msgId, "👀");
+async function processPrompt(chatId, userMsgId, statusMsgId, prompt, state) {
+  // React to user's message immediately (Hermes-style)
+  await setReaction(chatId, userMsgId, "👀");
 
   try {
+    // Progress step 1: thinking
+    await editMessage(chatId, statusMsgId, `🤔 *Processing:* ${escapeMd(prompt.slice(0, 100))}...`);
+
     const result = await runCommandCode(
       prompt,
       process.env.HOME,
@@ -741,10 +760,10 @@ async function processPrompt(chatId, statusMsgId, prompt, state) {
       ? `✅ *Done:* ${escapeMd(prompt.slice(0, 100))}\n\n${escapedResult}`
       : `✅ *Done* \\— ${escapeMd(prompt.slice(0, 100))}`;
 
-    // Edit the initial status message with the final result
-    await editMessage(chatId, msgId, doneMsg);
+    // Edit the status message with the final result
+    await editMessage(chatId, statusMsgId, doneMsg);
 
-    // Auto-send files detected in output
+    // Auto-send files detected in output (MEDIA: prefix + bare paths)
     if (result) {
       const paths = findFilePaths(result);
       for (const { path, type } of paths.slice(0, 5)) {
@@ -764,11 +783,12 @@ async function processPrompt(chatId, statusMsgId, prompt, state) {
       }
     }
 
-    await setReaction(chatId, msgId, "✅");
+    // React ✅ on user's message (replaces 👀)
+    await setReaction(chatId, userMsgId, "✅");
     return result;
   } catch (err) {
-    await editMessage(chatId, msgId, `❌ *Error:* ${escapeMd(err.message)}`);
-    await setReaction(chatId, msgId, "❌");
+    await editMessage(chatId, statusMsgId, `❌ *Error:* ${escapeMd(err.message)}`);
+    await setReaction(chatId, userMsgId, "❌");
     throw err;
   }
 }
@@ -881,9 +901,9 @@ async function poll() {
       if (mediaPrompt) {
         const state = getSession(chatId);
         const initialMsg = await sendMessage(chatId, `🚀 ${mediaDesc}: processing...`);
-        const msgId = initialMsg?.message_id || initialMsg?.result?.message_id;
-        if (msgId) {
-          await processPrompt(chatId, msgId, mediaPrompt, state);
+        const statusMsgId = initialMsg?.message_id || initialMsg?.result?.message_id;
+        if (statusMsgId && msg.message_id) {
+          await processPrompt(chatId, msg.message_id, statusMsgId, mediaPrompt, state);
           console.log(`✅ Completed ${mediaDesc} from ${username}`);
         }
         continue;
@@ -903,9 +923,9 @@ async function poll() {
           if (!prompt) continue;
           const state = getSession(chatId);
           const initialMsg = await sendMessage(chatId, `🚀 Running: \`${escapeMd(prompt.slice(0, 200))}\``);
-          const msgId = initialMsg?.message_id || initialMsg?.result?.message_id;
-          if (msgId) {
-            await processPrompt(chatId, msgId, prompt, state);
+          const statusMsgId = initialMsg?.message_id || initialMsg?.result?.message_id;
+          if (statusMsgId && msg.message_id) {
+            await processPrompt(chatId, msg.message_id, statusMsgId, prompt, state);
             console.log(`✅ Completed /cmd from ${username}`);
           }
           continue;
@@ -916,9 +936,9 @@ async function poll() {
       // ── Regular prompt ──
       const state = getSession(chatId);
       const initialMsg = await sendMessage(chatId, `🚀 Running: \`${escapeMd(text.slice(0, 200))}\``);
-      const msgId = initialMsg?.message_id || initialMsg?.result?.message_id;
-      if (msgId) {
-        await processPrompt(chatId, msgId, text, state);
+      const statusMsgId = initialMsg?.message_id || initialMsg?.result?.message_id;
+      if (statusMsgId && msg.message_id) {
+        await processPrompt(chatId, msg.message_id, statusMsgId, text, state);
         console.log(`✅ Completed prompt from ${username}`);
       }
     }
