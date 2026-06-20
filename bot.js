@@ -698,7 +698,8 @@ async function handleCommand(chatId, text, userInfo = {}) {
   // ── Commands that forward directly to CLI subcommands ──
   const CLI_MAP = {
     "/feedback":  { args: ["feedback", args], msg: "📝 Submitting feedback..." },
-    "/learntaste": { args: ["learn-taste"], msg: "🧠 Learning taste from repositories..." },
+    "/learntaste": { args: ["learn-taste", ...(args ? args.split(/\s+/) : [])], msg: "🧠 Learning taste from repositories..." },
+    "/learn-taste": { args: ["learn-taste", ...(args ? args.split(/\s+/) : [])], msg: "🧠 Learning taste from repositories..." },
     "/login":     { args: ["login"], msg: "🔑 Authenticating..." },
     "/logout":    { args: ["logout"], msg: "👋 Logging out..." },
     "/mcp":       { args: ["mcp", ...(args ? args.split(/\s+/) : ["list"])], msg: "🔌 Managing MCP servers..." },
