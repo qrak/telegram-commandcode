@@ -267,12 +267,12 @@ async def handle_command(
         await _send_chunked(update, msg)
         return None
 
-    # ── /resume ──
+    # ── /resume ── (Lane B — state engineering)
     if cc_slash == "/resume":
-        state.active = True
         session_store.update(chat_id, active=True)
-        await update.effective_chat.send_message("🔄 Resuming last headless session...")
-        return "Continue the previous session. Summarize what we were working on and ask what I'd like to do next."  # /resume
+        await update.effective_chat.send_message("🔄 Session resumed\\. Sending a continuation prompt\\.\\.\\.")
+        # Simple, clean prompt — no LLM-wrapped meta-instructions
+        return "Continue where we left off. Summarize what we were working on and ask what I'd like to do next."
 
     # ── /clear, /new ──
     if cc_slash in ("/clear", "/new"):
@@ -331,7 +331,7 @@ async def handle_command(
         )
         return None
 
-    # ── /plan ──
+    # ── /plan ── (Lane C for one-shot /plan <task>; Lane A for toggle)
     if cc_slash == "/plan":
         if args:
             # One-shot plan
@@ -361,7 +361,7 @@ async def handle_command(
             await update.effective_chat.send_message("🤷 No active execution to stop\\.")
         return None
 
-    # ── /retry ──
+    # ── /retry ── (Lane C — direct prompt re-execution)
     if cc_slash == "/retry":
         if args:
             return args  # /retry <new prompt>: use new prompt
@@ -422,7 +422,7 @@ async def handle_command(
         asyncio.create_task(_bg_task())
         return None
 
-    # ── /review ──
+    # ── /review ── (Lane C — legitimate LLM execution)
     if cc_slash == "/review":
         pr_ref = f" #{args}" if args else ""
         await update.effective_chat.send_chat_action(action="typing")
@@ -539,7 +539,7 @@ async def handle_command(
         )
         return None
 
-    # ── /pr-comments ──
+    # ── /pr-comments ── (Lane C — legitimate LLM execution)
     if cc_slash == "/pr-comments":
         await update.effective_chat.send_chat_action(action="typing")
         await update.effective_chat.send_message(f"🔍 Fetching PR comments{(' #' + args) if args else ''}...")
@@ -555,7 +555,7 @@ async def handle_command(
         )
         return None
 
-    # ── /memory ──
+    # ── /memory ── (Lane C with local fallback)
     if cc_slash == "/memory":
         if args:
             await update.effective_chat.send_chat_action(action="typing")
@@ -598,7 +598,7 @@ async def handle_command(
             )
         return None
 
-    # ── /init ──
+    # ── /init ── (Lane C — legitimate LLM execution)
     if cc_slash == "/init":
         await update.effective_chat.send_chat_action(action="typing")
         await update.effective_chat.send_message("📄 Initializing AGENTS\\.md\\.\\.\\.")
@@ -658,21 +658,30 @@ async def handle_command(
         )
         return None
 
-    # ── /undo ──
+    # ── /undo ── (Lane B — state engineering, no LLM-wrapped instructions)
     if cc_slash == "/undo":
         if not state.last_prompt:
             await update.effective_chat.send_message("🤷 No previous prompt to undo\\.")
             return None
-        n = int(args) if args.isdigit() else 1
-        await update.effective_chat.send_message(f"↩️ Undoing last {n} turn(s)\\. Re\\-running with adjusted context...")
-        return f"Re-run this prompt, ignoring the previous response: {state.last_prompt}" if state.last_prompt else None  # /undo
+        n = int(args) if (args and args.isdigit()) else 1
+        # Reset session state — unwinding the last turn
+        session_store.update(chat_id, active=False, one_shot_plan=False)
+        await update.effective_chat.send_message(
+            f"↩️ Undoing last {n} turn(s)\\. Re\\-running your prompt with a fresh session state\\.\\.\\."
+        )
+        # Return the clean last prompt for re-execution (no LLM wrapper text)
+        return state.last_prompt
 
-    # ── /fork ──
+    # ── /fork ── (Lane B — state engineering, no LLM forwarding)
     if cc_slash == "/fork":
         name = args or f"fork_{int(datetime.now().timestamp())}"
-        await update.effective_chat.send_chat_action(action="typing")
-        await update.effective_chat.send_message(f"🌿 Forking session as \"{escape_md2(name)}\"...")
-        return "Continue this conversation in a new forked session. Summarize what we've done so far."  # /fork
+        # Save current session snapshot and reset — fork means fresh start
+        session_store.update(chat_id, active=False, session_name=name)
+        await update.effective_chat.send_message(
+            f"🌿 Session forked as *{escape_md2(name)}*\\.\n\n"
+            f"Session state has been reset\\. Your next prompt starts a fresh conversation\\."
+        )
+        return None
 
     # ── /rename ──
     if cc_slash == "/rename":
@@ -772,27 +781,62 @@ async def handle_command(
         await _send_chunked(update, "\n".join(lines))
         return None
 
-    # ── /configure-models ──
+    # ── /configure-models ── (Lane A — local state, zero LLM)
     if cc_slash == "/configure-models":
-        await update.effective_chat.send_message(
-            "⚙️ Model-per-task configuration requires the interactive TUI.\n\n"
-            "Run `cmd` locally and use the built-in `/configure-models` command.",
+        await update.effective_chat.send_chat_action(action="typing")
+        cfg = _read_cc_config()
+        current_model = cfg.get("model", "default")
+        current_provider = cfg.get("provider", "command-code")
+        # Check for per-task model mappings
+        per_task = cfg.get("modelOverrides", cfg.get("permissions", {}))
+        if isinstance(per_task, dict) and per_task:
+            task_lines = "\n".join(
+                f"  • `{escape_md2(str(k))}` → `{escape_md2(str(v))}`"
+                for k, v in list(per_task.items())[:10]
+            )
+            task_section = f"\n*Per\\-task model overrides:*\n{task_lines}\n"
+        else:
+            task_section = "\n_No per\\-task overrides configured\\._\n"
+        try:
+            models_out = await _run_cli(["--list-models"], timeout=15)
+        except Exception:
+            models_out = "(could not fetch models)"
+        msg = (
+            f"⚙️ *Model Configuration*\n\n"
+            f"• Provider: `{escape_md2(current_provider)}`\n"
+            f"• Default model: `{escape_md2(current_model)}`\n"
+            f"{task_section}\n"
+            f"*Available models:*\n```\n{escape_md2(models_out[:800])}\n```\n"
+            f"\\- Use `/model <name>` to switch the default model\n"
+            f"\\- Use `/provider <name>` to switch provider\n"
+            f"\\- Set per\\-task overrides via CC config or the TUI\n"
         )
+        await _send_chunked(update, msg)
         return None
 
-    # ── /compact-mode ──
+    # ── /compact-mode ── (Lane A — local state, zero LLM)
     if cc_slash == "/compact-mode":
+        valid_modes = ("default", "aggressive", "gentle")
         if not args:
+            current = state.compact_mode or "default"
             await update.effective_chat.send_message(
-                "🗜️ *Compact modes*\n\n"
-                "Usage: `/compact\\-mode <mode>`\n\n"
-                "In headless mode, compacting is handled per\\-session\\. "
-                "Use `/clear` to start fresh, or send a prompt with compacting instructions\\.",
+                f"🗜️ *Compact mode:* `{escape_md2(current)}`\n\n"
+                f"Available modes: {', '.join(f'`{m}`' for m in valid_modes)}\n\n"
+                f"Use `/compact\\-mode <mode>` to change\\."
             )
             return None
-        await update.effective_chat.send_chat_action(action="typing")
-        await update.effective_chat.send_message(f"🗜️ Setting compact mode: {escape_md2(args)}...")
-        return f"Set the compact mode to: {args}. Apply this compact mode configuration."  # /compact-mode
+        mode = args.lower()
+        if mode not in valid_modes:
+            await update.effective_chat.send_message(
+                f"❌ Invalid mode: `{escape_md2(mode)}`\\. "
+                f"Use: {', '.join(f'`{m}`' for m in valid_modes)}\\."
+            )
+            return None
+        session_store.update(chat_id, compact_mode=mode)
+        await update.effective_chat.send_message(
+            f"🗜️ Compact mode set to *{escape_md2(mode)}*\\."
+        )
+        return None
 
     # ── /courses ──
     if cc_slash == "/courses":
@@ -818,7 +862,7 @@ async def handle_command(
         )
         return None
 
-    # ── /cmd ──
+    # ── /cmd ── (Lane C — direct prompt execution)
     if cc_slash == "/cmd":
         if not args:
             await update.effective_chat.send_message(

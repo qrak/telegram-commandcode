@@ -389,7 +389,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── Slash commands ──
     if text.startswith("/"):
-        result = await handle_command(update, context)
+        try:
+            result = await handle_command(update, context)
+        except Exception as e:
+            logger.error("Command handler crashed on %s: %s", text.split()[0] if text else "?", e)
+            await _send_message_safe(
+                chat_id,
+                f"❌ Internal error processing command\\.\n\n`{escape_md2(str(e)[:200])}`",
+                bot=context.bot,
+            )
+            return
         if result is None:
             return  # Command fully handled (response sent by handler)
         if result:
@@ -457,11 +466,23 @@ async def _enqueue_and_process(
     lock = _get_chat_lock(str(chat_id))
 
     # Spawn as background task — never block the handler
-    asyncio.create_task(
-        _process_with_lock(
-            context, chat_id, user_msg_id, prompt, lock, media_desc
-        )
-    )
+    async def _safe_process():
+        try:
+            await _process_with_lock(
+                context, chat_id, user_msg_id, prompt, lock, media_desc
+            )
+        except Exception as e:
+            logger.error("Background task crashed for chat %s: %s", chat_id, e)
+            try:
+                await _send_message_safe(
+                    chat_id,
+                    f"❌ Background task error: {escape_md2(str(e)[:300])}",
+                    bot=context.bot,
+                )
+            except Exception:
+                pass
+
+    asyncio.create_task(_safe_process())
 
 
 async def _process_with_lock(

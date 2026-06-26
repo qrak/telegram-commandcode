@@ -35,6 +35,7 @@ class ChatSession:
     add_dirs: list[str] = field(default_factory=list)  # --add-dir paths
     queued_prompts: list[str] = field(default_factory=list)  # /queue items
     session_name: Optional[str] = None  # /rename target
+    compact_mode: Optional[str] = None  # /compact-mode strategy (default, aggressive, gentle)
 
     def to_dict(self) -> dict:
         return asdict(self)
