@@ -745,15 +745,40 @@ async def handle_command(
 
     # ── /context ──
     if cc_slash == "/context":
-        await update.effective_chat.send_chat_action(action="typing")
-        await update.effective_chat.send_message("📊 Checking context window usage...")
-        return "Show the current context window usage and breakdown. How many tokens are in context?"  # /context
+        state = session_store.get(chat_id)
+        import os as _os
+        cwd = _os.getcwd()
+        home = _os.path.expanduser("~")
+        lines = [
+            "📊 *Session Context*",
+            "",
+            f"  Model: `{escape_md2(state.model or 'default')}`",
+            f"  Session: {'active' if state.active else 'none'}",
+            f"  Working dir: `{escape_md2(cwd)}`",
+            f"  Home: `{escape_md2(home)}`",
+            f"  Plan mode: {'ON' if state.plan_mode else 'off'}",
+            f"  Max turns: {DEFAULT_MAX_TURNS}",
+            f"  YOLO: {'on' if DEFAULT_YOLO else 'off'}",
+        ]
+        if state.goal:
+            lines.append(f"  Goal: {escape_md2(state.goal[:80])}")
+        if state.steer:
+            lines.append(f"  Steer: {escape_md2(state.steer[:80])}")
+        if state.add_dirs:
+            dirs = ', '.join(f"`{escape_md2(d)}`" for d in state.add_dirs[:3])
+            lines.append(f"  Added dirs: {dirs}")
+        lines.append("")
+        lines.append("_Context window specifics are managed server\u2010side by the API._")
+        await _send_chunked(update, "\n".join(lines))
+        return None
 
     # ── /configure-models ──
     if cc_slash == "/configure-models":
-        await update.effective_chat.send_chat_action(action="typing")
-        await update.effective_chat.send_message("⚙️ Configuring model assignments...")
-        return "Show the current model configuration for each built-in task (main, summary, title, etc.) and help me configure which model runs each task."  # /configure-models
+        await update.effective_chat.send_message(
+            "⚙️ Model-per-task configuration requires the interactive TUI.\n\n"
+            "Run `cmd` locally and use the built-in `/configure-models` command.",
+        )
+        return None
 
     # ── /compact-mode ──
     if cc_slash == "/compact-mode":
