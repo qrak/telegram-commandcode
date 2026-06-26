@@ -345,15 +345,16 @@ async def handle_command(
         new_mode = not state.plan_mode
         session_store.update(chat_id, plan_mode=new_mode, one_shot_plan=False)
         status = "ON ✅" if new_mode else "OFF ❌"
-        await update.effective_chat.send_message(
+        msg = (
             f"📋 Plan mode: *{status}*\n\n"
             + (
-                "Next prompts will run with `--plan`\\. Use `/plan` again to disable\\.\n"
+                "Next prompts will run with `\\-\\-plan`\\. Use `/plan` again to disable\\.\n"
                 "_Or use `/plan <task>` for a one\\-shot plan\\._"
                 if new_mode
-                else "Next prompts will run in normal mode\\._"
-            ),
+                else "Next prompts will run in normal mode\\."
+            )
         )
+        await _send_chunked(update, msg)
         return None
 
     # ── /yolo ── (Lane A — local state toggle)
@@ -361,14 +362,15 @@ async def handle_command(
         new_mode = not state.yolo
         session_store.update(chat_id, yolo=new_mode)
         status = "ON ✅" if new_mode else "OFF ❌"
-        await update.effective_chat.send_message(
+        msg = (
             f"⚡ YOLO mode: *{status}*\n\n"
             + (
-                "Next prompts will run with `--yolo`\\. Use `/yolo` again to disable\\._"
+                "Next prompts will run with `\\-\\-yolo`\\. Use `/yolo` again to disable\\."
                 if new_mode
-                else "Next prompts will run without `--yolo`\\. Use `/yolo` again to enable\\._"
-            ),
+                else "Next prompts will run without `\\-\\-yolo`\\. Use `/yolo` again to enable\\."
+            )
         )
+        await _send_chunked(update, msg)
         return None
 
     # ── /stop ──
