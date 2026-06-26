@@ -151,20 +151,20 @@ def _write_cc_config(cfg: dict) -> None:
 async def handle_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-) -> bool:
+) -> Optional[str]:
     """
     Handle a Telegram slash command.
 
-    Returns True if the command was handled (response sent or queued).
-    Returns False if it should be treated as a regular prompt.
-    Returns None if the update should be ignored.
+    Returns:
+        None  → command was fully handled (response sent, no further action)
+        str   → use this string as the prompt for `cmd -p` execution
     """
     if not update.message or not update.message.text:
-        return False
+        return None
 
     text = update.message.text.strip()
     if not text.startswith("/"):
-        return False
+        return None
 
     chat_id = str(update.effective_chat.id)
     user_id = update.effective_user.id if update.effective_user else None
@@ -198,7 +198,7 @@ async def handle_command(
             "  `/resume` \\- resume last session"
         )
         await _send_chunked(update, msg)
-        return True
+        return None
 
     # ── /help ──
     if cc_slash == "/help":
@@ -207,7 +207,7 @@ async def handle_command(
             "*Command Code commands:*\n\nType `/` in the message box to see all available commands\\.\n\n"
             "_Any other message → `cmd -p` prompt_",
         )
-        return True
+        return None
 
     # ── CLI-mapped commands ──
     if cc_slash in CLI_MAP:
@@ -219,7 +219,7 @@ async def handle_command(
         output = await _run_cli(cli_args, timeout=30)
         capped = output[:3800] + "\n...(truncated)" if len(output) > 3800 else output
         await _send_chunked(update, f"```\n{escape_md2(capped)}\n```")
-        return True
+        return None
 
     # ── /status ──
     if cc_slash == "/status":
@@ -265,14 +265,14 @@ async def handle_command(
             f"╚══ Use `/model` to switch, `/goal` to set objective, `/steer` to guide, `/clear` to reset"
         )
         await _send_chunked(update, msg)
-        return True
+        return None
 
     # ── /resume ──
     if cc_slash == "/resume":
         state.active = True
         session_store.update(chat_id, active=True)
         await update.effective_chat.send_message("🔄 Resuming last headless session...")
-        return False  # Fall through to prompt execution
+        return "Continue the previous session. Summarize what we were working on and ask what I'd like to do next."  # /resume
 
     # ── /clear, /new ──
     if cc_slash in ("/clear", "/new"):
@@ -281,7 +281,7 @@ async def handle_command(
             "🧹 Session cleared\\. Model reset to default, plan mode off, goal/steer cleared\\. "
             "Next prompt starts fresh\\.",
         )
-        return True
+        return None
 
     # ── /model ──
     if cc_slash == "/model":
@@ -299,7 +299,7 @@ async def handle_command(
                 f"✅ Switched to model: *{escape_md2(args)}*\n\n"
                 f"Next prompts will use `\\-m {escape_md2(args)}`\\.",
             )
-            return True
+            return None
 
         # List models
         await update.effective_chat.send_chat_action(action="typing")
@@ -329,14 +329,14 @@ async def handle_command(
             f"{current}\n"
             f"_Use `/model <name>` to switch, e\\.g\\. `/model claude\\-sonnet\\-4\\-6`_",
         )
-        return True
+        return None
 
     # ── /plan ──
     if cc_slash == "/plan":
         if args:
             # One-shot plan
             session_store.update(chat_id, plan_mode=True, one_shot_plan=True)
-            return False  # Fall through to prompt execution
+            return args  # /plan <task>: one-shot plan prompt
         # Toggle
         new_mode = not state.plan_mode
         session_store.update(chat_id, plan_mode=new_mode, one_shot_plan=False)
@@ -350,7 +350,7 @@ async def handle_command(
                 else "Next prompts will run in normal mode\\."
             ),
         )
-        return True
+        return None
 
     # ── /stop ──
     if cc_slash == "/stop":
@@ -359,16 +359,18 @@ async def handle_command(
             await update.effective_chat.send_message("🛑 Execution stopped by user\\.")
         else:
             await update.effective_chat.send_message("🤷 No active execution to stop\\.")
-        return True
+        return None
 
     # ── /retry ──
     if cc_slash == "/retry":
+        if args:
+            return args  # /retry <new prompt>: use new prompt
         if not state.last_prompt:
             await update.effective_chat.send_message(
                 "🤷 No previous prompt to retry\\. Send a message first\\.",
             )
-            return True
-        return False  # Fall through with last_prompt
+            return None
+        return state.last_prompt  # /retry: re-run last prompt
 
     # ── /whoami ──
     if cc_slash == "/whoami":
@@ -381,7 +383,7 @@ async def handle_command(
             f"  Chat type: {escape_md2(chat_type)}\n"
             f"  PID: {pid}",
         )
-        return True
+        return None
 
     # ── /background ──
     if cc_slash == "/background":
@@ -390,7 +392,7 @@ async def handle_command(
                 "Usage: `/background <prompt>` — run a task in the background\\.\n\n"
                 "You'll be notified here when it completes\\.",
             )
-            return True
+            return None
 
         bg_id = f"bg_{int(datetime.now().timestamp())}"
         await update.effective_chat.send_message(
@@ -418,14 +420,14 @@ async def handle_command(
                 logger.error("Failed to send bg task result: %s", e)
 
         asyncio.create_task(_bg_task())
-        return True
+        return None
 
     # ── /review ──
     if cc_slash == "/review":
         pr_ref = f" #{args}" if args else ""
         await update.effective_chat.send_chat_action(action="typing")
         await update.effective_chat.send_message(f"🔍 Reviewing PR{escape_md2(pr_ref)}...")
-        return False  # Fall through to prompt execution
+        return f"Review pull request{pr_ref}. Check for bugs, security issues, test gaps, and style problems."  # /review
 
     # ── /steer ──
     if cc_slash == "/steer":
@@ -440,17 +442,17 @@ async def handle_command(
                     "🧭 *No steer set\\.*\n\n"
                     "Use `/steer <instruction>` to guide the AI's behavior mid\\-session\\.",
                 )
-            return True
+            return None
         if args.lower() == "clear":
             session_store.update(chat_id, steer=None)
             await update.effective_chat.send_message("🧭 Steer cleared\\.")
-            return True
+            return None
         session_store.update(chat_id, steer=args)
         await update.effective_chat.send_message(
             f"🧭 Steer set\\.\n\n{escape_md2(args)}\n\n"
             f"It will be applied to all subsequent prompts\\. Use `/steer clear` to remove\\.",
         )
-        return True
+        return None
 
     # ── /effort, /reasoning, /reason ──
     if cc_slash in ("/effort", "/reasoning", "/reason"):
@@ -471,14 +473,14 @@ async def handle_command(
                     f"Valid levels: {', '.join(f'`{l}`' for l in VALID_EFFORT_LEVELS)}\n\n"
                     f"Use `/effort <level>` to set it\\.",
                 )
-            return True
+            return None
 
         level = args.lower()
         if level not in VALID_EFFORT_LEVELS:
             await update.effective_chat.send_message(
                 f"❌ Invalid effort level\\. Valid: {', '.join(f'`{l}`' for l in VALID_EFFORT_LEVELS)}",
             )
-            return True
+            return None
 
         cfg.setdefault("reasoningEffort", {})
         cfg["reasoningEffort"][current_model] = level
@@ -486,7 +488,7 @@ async def handle_command(
         await update.effective_chat.send_message(
             f"✅ Effort set to *{escape_md2(level)}* for `{escape_md2(current_model)}`\\.",
         )
-        return True
+        return None
 
     # ── /provider ──
     if cc_slash == "/provider":
@@ -498,13 +500,13 @@ async def handle_command(
                 f"Use `/provider <name>` to switch\\.\n"
                 f"_(Note: only locally installed providers are available\\.)_",
             )
-            return True
+            return None
         cfg["provider"] = args
         _write_cc_config(cfg)
         await update.effective_chat.send_message(
             f"✅ Provider switched to *{escape_md2(args)}*\\.",
         )
-        return True
+        return None
 
     # ── /add-dir ──
     if cc_slash == "/add-dir":
@@ -524,24 +526,24 @@ async def handle_command(
                     f"📂 *Added directories:*\n{dirs}\n\n"
                     f"Use `/add\\-dir clear` to remove all, or add more with `/add\\-dir <path>`\\.",
                 )
-            return True
+            return None
         if args.lower() == "clear":
             session_store.update(chat_id, add_dirs=[])
             await update.effective_chat.send_message("📂 All added directories cleared\\.")
-            return True
+            return None
         new_dirs = list(state.add_dirs) + [args]
         session_store.update(chat_id, add_dirs=new_dirs)
         await update.effective_chat.send_message(
             f"📂 Added directory: `{escape_md2(args)}`\n"
             f"Total: {len(new_dirs)}\\. Use `/add\\-dir clear` to remove all\\.",
         )
-        return True
+        return None
 
     # ── /pr-comments ──
     if cc_slash == "/pr-comments":
         await update.effective_chat.send_chat_action(action="typing")
         await update.effective_chat.send_message(f"🔍 Fetching PR comments{(' #' + args) if args else ''}...")
-        return False  # Fall through to prompt execution
+        return "Fetch and display all comments from the current GitHub pull request. First run gh pr view to identify the PR, then fetch and show comments."  # /pr-comments
 
     # ── /compact ──
     if cc_slash == "/compact":
@@ -551,14 +553,14 @@ async def handle_command(
             "Use `/clear` to reset your session state \\(model, plan mode, steer\\), "
             "or just send a new prompt\\.",
         )
-        return True
+        return None
 
     # ── /memory ──
     if cc_slash == "/memory":
         if args:
             await update.effective_chat.send_chat_action(action="typing")
             await update.effective_chat.send_message(f"🧠 Managing memory: {escape_md2(args[:100])}...")
-            return False  # Fall through to prompt execution
+            return f"Manage Command Code memory. {args}\n\nRead AGENTS.md files if needed and make requested changes."  # /memory
         else:
             paths = [
                 Path("/etc/.commandcode/AGENTS.md"),
@@ -577,7 +579,7 @@ async def handle_command(
                 await update.effective_chat.send_message(
                     "🧠 No memory files found\\. Use `/memory <instruction>` to create one\\.",
                 )
-            return True
+            return None
 
     # ── /agents ──
     if cc_slash == "/agents":
@@ -594,13 +596,13 @@ async def handle_command(
                 "Interactive agent management \\(TUI\\) is not available remotely\\. "
                 "Describe what you want and I can help set it up via prompt\\.",
             )
-        return True
+        return None
 
     # ── /init ──
     if cc_slash == "/init":
         await update.effective_chat.send_chat_action(action="typing")
         await update.effective_chat.send_message("📄 Initializing AGENTS\\.md\\.\\.\\.")
-        return False  # Fall through to prompt execution
+        return "Create or update AGENTS.md for this project based on its structure, tech stack, and conventions."  # /init
 
     # ── /goal ──
     if cc_slash == "/goal":
@@ -617,22 +619,22 @@ async def handle_command(
                     "Use `/goal clear` to remove it\\.\n"
                     "Use `/goal status` to check it\\.",
                 )
-            return True
+            return None
         if args.lower() == "clear":
             session_store.update(chat_id, goal=None)
             await update.effective_chat.send_message("🎯 Goal cleared\\.")
-            return True
+            return None
         if args.lower() == "status":
             await update.effective_chat.send_message(
                 f"🎯 *Goal:* {escape_md2(state.goal)}" if state.goal else "🎯 *No goal set\\.*"
             )
-            return True
+            return None
         session_store.update(chat_id, goal=args)
         await update.effective_chat.send_message(
             f"🎯 Goal set:\n\n{escape_md2(args)}\n\n"
             f"_This will be prepended to all subsequent prompts until cleared\\._",
         )
-        return True
+        return None
 
     # ── /queue ──
     if cc_slash == "/queue":
@@ -647,30 +649,30 @@ async def handle_command(
                     for i, p in enumerate(state.queued_prompts)
                 )
                 await update.effective_chat.send_message(f"📋 *Queued prompts:*\n{items}")
-            return True
+            return None
         new_queue = list(state.queued_prompts) + [args]
         session_store.update(chat_id, queued_prompts=new_queue)
         await update.effective_chat.send_message(
             f"📋 Queued prompt ({len(new_queue)} total)\\. "
             f"It will run after the current task completes\\.",
         )
-        return True
+        return None
 
     # ── /undo ──
     if cc_slash == "/undo":
         if not state.last_prompt:
             await update.effective_chat.send_message("🤷 No previous prompt to undo\\.")
-            return True
+            return None
         n = int(args) if args.isdigit() else 1
         await update.effective_chat.send_message(f"↩️ Undoing last {n} turn(s)\\. Re\\-running with adjusted context...")
-        return False  # Fall through
+        return f"Re-run this prompt, ignoring the previous response: {state.last_prompt}" if state.last_prompt else None  # /undo
 
     # ── /fork ──
     if cc_slash == "/fork":
         name = args or f"fork_{int(datetime.now().timestamp())}"
         await update.effective_chat.send_chat_action(action="typing")
         await update.effective_chat.send_message(f"🌿 Forking session as \"{escape_md2(name)}\"...")
-        return False  # Fall through to prompt execution
+        return "Continue this conversation in a new forked session. Summarize what we've done so far."  # /fork
 
     # ── /rename ──
     if cc_slash == "/rename":
@@ -683,10 +685,10 @@ async def handle_command(
                 await update.effective_chat.send_message(
                     "📝 No session name set\\. Use `/rename <name>` to name this session\\.",
                 )
-            return True
+            return None
         session_store.update(chat_id, session_name=args)
         await update.effective_chat.send_message(f"📝 Session renamed to: *{escape_md2(args)}*")
-        return True
+        return None
 
     # ── /reload ──
     if cc_slash == "/reload":
@@ -701,14 +703,14 @@ async def handle_command(
         output = await _run_cli(["info"], timeout=15)
         capped = output[:3800] + "\n...(truncated)" if len(output) > 3800 else output
         await _send_chunked(update, f"```\n{escape_md2(capped)}\n```")
-        return True
+        return None
 
     # ── /version ──
     if cc_slash == "/version":
         await update.effective_chat.send_chat_action(action="typing")
         ver = await _run_cli(["--version"], timeout=10)
         await update.effective_chat.send_message(f"📦 *Command Code* v{escape_md2(ver)}")
-        return True
+        return None
 
     # ── /usage ──
     if cc_slash == "/usage":
@@ -730,7 +732,7 @@ async def handle_command(
             f"╟ YOLO: {'on' if DEFAULT_YOLO else 'off'}\n"
             f"╚══ _Detailed usage metrics require the TUI\\. Run `cmd` locally for full breakdown\\._",
         )
-        return True
+        return None
 
     # ── /update ──
     if cc_slash == "/update":
@@ -739,19 +741,19 @@ async def handle_command(
         output = await _run_cli(["update"], timeout=120)
         capped = output[:3800] + "\n...(truncated)" if len(output) > 3800 else output
         await _send_chunked(update, f"```\n{escape_md2(capped)}\n```")
-        return True
+        return None
 
     # ── /context ──
     if cc_slash == "/context":
         await update.effective_chat.send_chat_action(action="typing")
         await update.effective_chat.send_message("📊 Checking context window usage...")
-        return False  # Fall through to prompt execution
+        return "Show the current context window usage and breakdown. How many tokens are in context?"  # /context
 
     # ── /configure-models ──
     if cc_slash == "/configure-models":
         await update.effective_chat.send_chat_action(action="typing")
         await update.effective_chat.send_message("⚙️ Configuring model assignments...")
-        return False  # Fall through to prompt execution
+        return "Show the current model configuration for each built-in task (main, summary, title, etc.) and help me configure which model runs each task."  # /configure-models
 
     # ── /compact-mode ──
     if cc_slash == "/compact-mode":
@@ -762,10 +764,10 @@ async def handle_command(
                 "In headless mode, compacting is handled per\\-session\\. "
                 "Use `/clear` to start fresh, or send a prompt with compacting instructions\\.",
             )
-            return True
+            return None
         await update.effective_chat.send_chat_action(action="typing")
         await update.effective_chat.send_message(f"🗜️ Setting compact mode: {escape_md2(args)}...")
-        return False  # Fall through
+        return f"Set the compact mode to: {args}. Apply this compact mode configuration."  # /compact-mode
 
     # ── /courses ──
     if cc_slash == "/courses":
@@ -774,7 +776,7 @@ async def handle_command(
             "[Open courses in browser](https://commandcode\\.ai/courses)\n\n"
             "_Learn how to get the most out of Command Code\\._",
         )
-        return True
+        return None
 
     # ── TUI-only ──
     if cc_slash in TUI_ONLY:
@@ -782,14 +784,14 @@ async def handle_command(
             f"ℹ️ {cc_slash} is a TUI\\-only command \\(interactive terminal mode\\) "
             f"and cannot be executed remotely\\. Use it in a local `cmd` session\\.",
         )
-        return True
+        return None
 
     # ── N/A commands ──
     if cc_slash in NA_CMDS:
         await update.effective_chat.send_message(
             f"ℹ️ {cc_slash} is not applicable when using Command Code remotely via Telegram\\.",
         )
-        return True
+        return None
 
     # ── /cmd ──
     if cc_slash == "/cmd":
@@ -797,14 +799,14 @@ async def handle_command(
             await update.effective_chat.send_message(
                 "Usage: `/cmd <prompt>` — run a prompt through Command Code",
             )
-            return True
-        return False  # Fall through to prompt execution
+            return None
+        return args  # /cmd <prompt>
 
     # Unknown slash command → help
     if not args:
         await update.effective_chat.send_message(
             f"Unknown command: `{escape_md2(cc_slash)}`\\. Use /help to see available commands\\.",
         )
-        return True
+        return None
 
-    return False  # Not a command → treat as regular prompt
+    return args  # Unknown command with args → treat as prompt

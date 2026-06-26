@@ -1,0 +1,19 @@
+[Unit]
+Description=Telegram Command Code Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/qrak/.local/bin/telegram-commandcode
+WorkingDirectory=/home/qrak/dev/telegram-commandcode
+EnvironmentFile=/home/qrak/dev/telegram-commandcode/.env
+Restart=always
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

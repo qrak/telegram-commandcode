@@ -311,7 +311,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    logger.info("📩 [%s] [%s] %s", username, chat_type, (text or "(media)")[:80])
+    logger.info("📩 [%s/%s] [%s] %s", username, user_id, chat_type, (text or "(media)")[:80])
 
     # ── Rate limiting ──
     now = asyncio.get_event_loop().time()
@@ -389,37 +389,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── Slash commands ──
     if text.startswith("/"):
-        handled = await handle_command(update, context)
-        if handled:
-            return
-
-        # /retry with args → treat as prompt
-        if text.startswith("/retry "):
-            prompt = text[7:].strip()
-            if prompt:
-                await _enqueue_and_process(context, chat_id, user_msg_id, prompt)
-                return
-            # /retry without args handled in commands.py, falls through
-            state = session_store.get(str(chat_id))
-            if state.last_prompt:
-                await _enqueue_and_process(context, chat_id, user_msg_id, state.last_prompt)
-                return
-            await _send_message_safe(chat_id, "🤷 No previous prompt to retry\\.", bot=context.bot)
-            return
-
-        # /cmd with args → treat as prompt
-        if text.startswith("/cmd "):
-            prompt = text[5:].strip()
-            if prompt:
-                await _enqueue_and_process(context, chat_id, user_msg_id, prompt)
-                return
-            return
-
-        # Commands that fall through (like /plan <task>, /resume, /background, etc.)
-        if not text.startswith("/retry") and not text.startswith("/cmd"):
-            prompt = text  # Use the full command text as prompt for fallthrough
-            await _enqueue_and_process(context, chat_id, user_msg_id, prompt)
-            return
+        result = await handle_command(update, context)
+        if result is None:
+            return  # Command fully handled (response sent by handler)
+        if result:
+            # Handler returned a prompt string → execute it
+            await _enqueue_and_process(context, chat_id, user_msg_id, result)
         return
 
     # ── Regular prompt ──
