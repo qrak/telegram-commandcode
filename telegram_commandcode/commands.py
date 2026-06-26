@@ -259,7 +259,7 @@ async def handle_command(
             f"╟ Binary: `{escape_md2(DEFAULT_CMD_BIN)}` v{escape_md2(version)}\n"
             f"╟ Auth: {escape_md2(whoami or 'not logged in')}\n"
             f"╟ {escape_md2(session_info)}\n"
-            f"╟ {escape_md2(plan_info)} · YOLO: {'on' if DEFAULT_YOLO else 'off'} · Turns: {DEFAULT_MAX_TURNS}\n"
+            f"╟ {escape_md2(plan_info)} · YOLO: {'on' if state.yolo else 'off'} · Turns: {DEFAULT_MAX_TURNS}\\n"
             f"╟ {escape_md2(goal_info)}\n"
             f"╟ {escape_md2(steer_info)}\n"
             f"╚══ Use `/model` to switch, `/goal` to set objective, `/steer` to guide, `/clear` to reset"
@@ -347,7 +347,22 @@ async def handle_command(
                 "Next prompts will run with `--plan`\\. Use `/plan` again to disable\\.\n"
                 "_Or use `/plan <task>` for a one\\-shot plan\\._"
                 if new_mode
-                else "Next prompts will run in normal mode\\."
+                else "Next prompts will run in normal mode\\._"
+            ),
+        )
+        return None
+
+    # ── /yolo ── (Lane A — local state toggle)
+    if cc_slash == "/yolo":
+        new_mode = not state.yolo
+        session_store.update(chat_id, yolo=new_mode)
+        status = "ON ✅" if new_mode else "OFF ❌"
+        await update.effective_chat.send_message(
+            f"⚡ YOLO mode: *{status}*\n\n"
+            + (
+                "Next prompts will run with `--yolo`\\. Use `/yolo` again to disable\\._"
+                if new_mode
+                else "Next prompts will run without `--yolo`\\. Use `/yolo` again to enable\\._"
             ),
         )
         return None
@@ -738,7 +753,7 @@ async def handle_command(
             f"╟ Version: v{escape_md2(version)}\n"
             f"╟ Model: `{escape_md2(model_name)}`\n"
             f"╟ Max turns: {DEFAULT_MAX_TURNS}\n"
-            f"╟ YOLO: {'on' if DEFAULT_YOLO else 'off'}\n"
+            f"╟ YOLO: {'on' if state.yolo else 'off'}\\n"
             f"╚══ _Detailed usage metrics require the TUI\\. Run `cmd` locally for full breakdown\\._",
         )
         return None
@@ -767,7 +782,7 @@ async def handle_command(
             f"  Home: `{escape_md2(home)}`",
             f"  Plan mode: {'ON' if state.plan_mode else 'off'}",
             f"  Max turns: {DEFAULT_MAX_TURNS}",
-            f"  YOLO: {'on' if DEFAULT_YOLO else 'off'}",
+            f"  YOLO: {'on' if state.yolo else 'off'}",
         ]
         if state.goal:
             lines.append(f"  Goal: {escape_md2(state.goal[:80])}")

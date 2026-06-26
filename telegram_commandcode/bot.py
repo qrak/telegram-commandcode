@@ -102,6 +102,7 @@ BOT_COMMANDS = [
     ("update", "Update Command Code to latest version"),
     ("usage", "Show credits, plan, and usage metrics"),
     ("version", "Show Command Code version"),
+    ("yolo", "Toggle YOLO mode on/off"),
     ("whoami", "Show your user info"),
 ]
 

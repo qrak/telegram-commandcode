@@ -564,6 +564,7 @@ async def _process_prompt(
             plan_mode=state.plan_mode,
             continue_session=state.active,
             add_dirs=list(state.add_dirs),
+            yolo=state.yolo,
         )
         result = await run_cmd(final_prompt, opts, chat_id=chat_id_str)
 
