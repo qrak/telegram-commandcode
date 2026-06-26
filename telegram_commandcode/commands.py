@@ -214,8 +214,8 @@ async def handle_command(
         cli_args_base, status_msg = CLI_MAP[cc_slash]
         # Build CLI args: no args → default to "list", with args → use as-is
         if cc_slash == "/taste" and args:
-            # /taste <name> → cmd taste install <name>
-            cli_args = cli_args_base + ["install"] + args.split()
+            # /taste <name> → cmd taste pull <name>
+            cli_args = cli_args_base + ["pull"] + args.split()
         else:
             cli_args = cli_args_base + (args.split() if args else ["list"])
         await update.effective_chat.send_message(escape_md2(status_msg))
