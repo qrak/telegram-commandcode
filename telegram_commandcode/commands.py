@@ -108,6 +108,11 @@ async def _send_chunked(update: Update, text: str, parse_mode: str = "MarkdownV2
             logger.error("Failed to send file fallback: %s", e)
 
 
+async def _send_md(update: Update, text: str) -> None:
+    """Send a MarkdownV2-formatted message via _send_chunked (shortcut)."""
+    await _send_chunked(update, text)
+
+
 async def _run_cli(args: list[str], timeout: int = 30) -> str:
     """
     Run a Command Code CLI subcommand and return its stdout (or stderr on failure).
@@ -205,13 +210,56 @@ async def handle_command(
         await _send_chunked(update, msg)
         return None
 
-    # ── /help ──
+    # ── /help ── (Lane A — local)
     if cc_slash == "/help":
-        await _send_chunked(
-            update,
-            "*Command Code commands:*\n\nType `/` in the message box to see all available commands\\.\n\n"
-            "_Any other message → `cmd -p` prompt_",
+        help_text = (
+            "🤖 *Command Code Bot — Help*\n\n"
+            "*Session & State:*\n"
+            "  `/context` — Show session state, model, working dir\n"
+            "  `/status` — Environment overview \\+ auth status\n"
+            "  `/whoami` — Your user ID and chat info\n"
+            "  `/clear` — Reset session \\(fresh start\\)\n"
+            "  `/compact` — Compact \\= reset session state\n"
+            "  `/reload` — Restart the bot\n\n"
+            "*Model & Config:*\n"
+            "  `/model` — List models or switch: `/model <name>`\n"
+            "  `/configure\\-models` — Show current model \\+ per\\-task overrides\n"
+            "  `/provider` — Switch AI provider: `/provider <name>`\n"
+            "  `/effort` — Set reasoning effort: `/effort <low|medium|high|xhigh|max>`\n\n"
+            "*Workflow:*\n"
+            "  `/goal <text>` — Set a standing objective\n"
+            "  `/steer <text>` — Mid\\-session guidance\n"
+            "  `/plan` — Toggle plan mode; `/plan <task>` for one\\-shot\n"
+            "  `/yolo` — Toggle YOLO mode \\(auto\\-approve\\)\n"
+            "  `/undo` — Undo last turn \\+ re\\-run prompt\n"
+            "  `/retry` — Re\\-run last prompt\n"
+            "  `/fork` — Name \\+ reset session\n"
+            "  `/resume` — Continue a previous session\n"
+            "  `/stop` — Kill running execution\n"
+            "  `/background <p>` — Run a task in background\n"
+            "  `/queue <p>` — Queue prompt for next turn\n\n"
+            "*Files & Memory:*\n"
+            "  `/add\\-dir <path>` — Add a directory to workspace\n"
+            "  `/init` — Create or update AGENTS\\.md\n"
+            "  `/memory` — List or modify memory files\n"
+            "  `/rename` — Name the current session\n\n"
+            "*GitHub & PRs:*\n"
+            "  `/review` — Review a PR: `/review <# or url>`\n"
+            "  `/pr\\-comments` — Fetch PR comments\n\n"
+            "*CLI Commands:*\n"
+            "  `/feedback` — Submit feedback\n"
+            "  `/login` / `/logout` — Auth management\n"
+            "  `/mcp` — MCP server management\n"
+            "  `/skills` — Browse agent skills\n"
+            "  `/taste` — List / install taste packages\n"
+            "  `/update` — Update Command Code\n"
+            "  `/version` — Show version\n"
+            "  `/usage` — Show credits \\+ metrics\n"
+            "  `/info` — System information\n"
+            "  `/cmd <prompt>` — Run a one\\-shot prompt\n\n"
+            "_Any other message is sent to the AI as a prompt\\._\n"
         )
+        await _send_chunked(update, help_text)
         return None
 
     # ── CLI-mapped commands ──
@@ -223,7 +271,7 @@ async def handle_command(
             cli_args = cli_args_base + ["pull"] + args.split()
         else:
             cli_args = cli_args_base + (args.split() if args else ["list"])
-        await update.effective_chat.send_message(escape_md2(status_msg))
+        await _send_md(update, escape_md2(status_msg))
         await update.effective_chat.send_chat_action(action="typing")
         output = await _run_cli(cli_args, timeout=30)
         capped = output[:3800] + "\n...(truncated)" if len(output) > 3800 else output
@@ -268,7 +316,7 @@ async def handle_command(
             f"╟ Binary: `{escape_md2(DEFAULT_CMD_BIN)}` v{escape_md2(version)}\n"
             f"╟ Auth: {escape_md2(whoami or 'not logged in')}\n"
             f"╟ {escape_md2(session_info)}\n"
-            f"╟ {escape_md2(plan_info)} · YOLO: {'on' if state.yolo else 'off'} · Turns: {DEFAULT_MAX_TURNS}\\n"
+            f"╟ {escape_md2(plan_info)} · YOLO: {'on' if state.yolo else 'off'} · Turns: {DEFAULT_MAX_TURNS}\n"
             f"╟ {escape_md2(goal_info)}\n"
             f"╟ {escape_md2(steer_info)}\n"
             f"╚══ Use `/model` to switch, `/goal` to set objective, `/steer` to guide, `/clear` to reset"
@@ -279,14 +327,14 @@ async def handle_command(
     # ── /resume ── (Lane B — state engineering)
     if cc_slash == "/resume":
         session_store.update(chat_id, active=True)
-        await update.effective_chat.send_message("🔄 Session resumed\\. Sending a continuation prompt\\.\\.\\.")
+        await _send_md(update, "🔄 Session resumed\\. Sending a continuation prompt\\.\\.\\.")
         # Simple, clean prompt — no LLM-wrapped meta-instructions
         return "Continue where we left off. Summarize what we were working on and ask what I'd like to do next."
 
     # ── /clear, /new ──
     if cc_slash in ("/clear", "/new"):
         session_store.reset(chat_id)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             "🧹 Session cleared\\. Model reset to default, plan mode off, goal/steer cleared\\. "
             "Next prompt starts fresh\\.",
         )
@@ -304,7 +352,7 @@ async def handle_command(
                 _write_cc_config(cfg)
             except Exception:
                 pass
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 f"✅ Switched to model: *{escape_md2(args)}*\n\n"
                 f"Next prompts will use `\\-m {escape_md2(args)}`\\.",
             )
@@ -382,9 +430,9 @@ async def handle_command(
     if cc_slash == "/stop":
         killed = await process_tracker.kill(chat_id)
         if killed:
-            await update.effective_chat.send_message("🛑 Execution stopped by user\\.")
+            await _send_md(update, "🛑 Execution stopped by user\\.")
         else:
-            await update.effective_chat.send_message("🤷 No active execution to stop\\.")
+            await _send_md(update, "🤷 No active execution to stop\\.")
         return None
 
     # ── /retry ── (Lane C — direct prompt re-execution)
@@ -392,7 +440,7 @@ async def handle_command(
         if args:
             return args  # /retry <new prompt>: use new prompt
         if not state.last_prompt:
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 "🤷 No previous prompt to retry\\. Send a message first\\.",
             )
             return None
@@ -401,7 +449,7 @@ async def handle_command(
     # ── /whoami ──
     if cc_slash == "/whoami":
         pid = "active" if process_tracker.get(chat_id) else "idle"
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"*User info*\n"
             f"  ID: `{user_id or 'unknown'}`\n"
             f"  Username: @{escape_md2(str(username))}\n"
@@ -414,14 +462,14 @@ async def handle_command(
     # ── /background ──
     if cc_slash == "/background":
         if not args:
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 "Usage: `/background <prompt>` — run a task in the background\\.\n\n"
                 "You'll be notified here when it completes\\.",
             )
             return None
 
         bg_id = f"bg_{int(datetime.now().timestamp())}"
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"🔄 Background task started: \"{escape_md2(args[:100])}\"\nTask ID: `{bg_id}`",
         )
 
@@ -439,7 +487,7 @@ async def handle_command(
             out = result.output[:3800]
             status = "✅" if result.success else "⚠️"
             try:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     f"{status} *Background task complete* \\({bg_id}\\)\n\n{escape_md2(out)}",
                 )
             except Exception as e:
@@ -452,29 +500,29 @@ async def handle_command(
     if cc_slash == "/review":
         pr_ref = f" #{args}" if args else ""
         await update.effective_chat.send_chat_action(action="typing")
-        await update.effective_chat.send_message(f"🔍 Reviewing PR{escape_md2(pr_ref)}...")
+        await _send_md(update, f"🔍 Reviewing PR{escape_md2(pr_ref)}...")
         return f"Review pull request{pr_ref}. Check for bugs, security issues, test gaps, and style problems."  # /review
 
     # ── /steer ──
     if cc_slash == "/steer":
         if not args:
             if state.steer:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     f"🧭 *Current steer:*\n\n{escape_md2(state.steer)}\n\n"
                     f"_Use `/steer clear` to remove it\\._",
                 )
             else:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     "🧭 *No steer set\\.*\n\n"
                     "Use `/steer <instruction>` to guide the AI's behavior mid\\-session\\.",
                 )
             return None
         if args.lower() == "clear":
             session_store.update(chat_id, steer=None)
-            await update.effective_chat.send_message("🧭 Steer cleared\\.")
+            await _send_md(update, "🧭 Steer cleared\\.")
             return None
         session_store.update(chat_id, steer=args)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"🧭 Steer set\\.\n\n{escape_md2(args)}\n\n"
             f"It will be applied to all subsequent prompts\\. Use `/steer clear` to remove\\.",
         )
@@ -488,13 +536,13 @@ async def handle_command(
 
         if not args:
             if current_effort:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     f"🧠 Current effort for `{escape_md2(current_model)}`: *{escape_md2(current_effort)}*\n\n"
                     f"Valid levels: {', '.join(f'`{l}`' for l in VALID_EFFORT_LEVELS)}\n\n"
                     f"Use `/effort <level>` to change it\\.",
                 )
             else:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     f"🧠 No effort set for `{escape_md2(current_model)}` (uses model default)\\.\n\n"
                     f"Valid levels: {', '.join(f'`{l}`' for l in VALID_EFFORT_LEVELS)}\n\n"
                     f"Use `/effort <level>` to set it\\.",
@@ -503,7 +551,7 @@ async def handle_command(
 
         level = args.lower()
         if level not in VALID_EFFORT_LEVELS:
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 f"❌ Invalid effort level\\. Valid: {', '.join(f'`{l}`' for l in VALID_EFFORT_LEVELS)}",
             )
             return None
@@ -511,7 +559,7 @@ async def handle_command(
         cfg.setdefault("reasoningEffort", {})
         cfg["reasoningEffort"][current_model] = level
         _write_cc_config(cfg)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"✅ Effort set to *{escape_md2(level)}* for `{escape_md2(current_model)}`\\.",
         )
         return None
@@ -521,7 +569,7 @@ async def handle_command(
         cfg = _read_cc_config()
         current = cfg.get("provider", "command-code")
         if not args:
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 f"🔌 Current provider: *{escape_md2(current)}*\n\n"
                 f"Use `/provider <name>` to switch\\.\n"
                 f"_(Note: only locally installed providers are available\\.)_",
@@ -529,7 +577,7 @@ async def handle_command(
             return None
         cfg["provider"] = args
         _write_cc_config(cfg)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"✅ Provider switched to *{escape_md2(args)}*\\.",
         )
         return None
@@ -538,7 +586,7 @@ async def handle_command(
     if cc_slash == "/add-dir":
         if not args:
             if not state.add_dirs:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     "📂 No directories added yet\\.\n\n"
                     "Use `/add\\-dir <path>` to add a directory to the workspace context\\.\n"
                     "Use `/add\\-dir clear` to remove all\\.",
@@ -548,18 +596,18 @@ async def handle_command(
                     f"  {i + 1}\\. `{escape_md2(d)}`"
                     for i, d in enumerate(state.add_dirs)
                 )
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     f"📂 *Added directories:*\n{dirs}\n\n"
                     f"Use `/add\\-dir clear` to remove all, or add more with `/add\\-dir <path>`\\.",
                 )
             return None
         if args.lower() == "clear":
             session_store.update(chat_id, add_dirs=[])
-            await update.effective_chat.send_message("📂 All added directories cleared\\.")
+            await _send_md(update, "📂 All added directories cleared\\.")
             return None
         new_dirs = list(state.add_dirs) + [args]
         session_store.update(chat_id, add_dirs=new_dirs)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"📂 Added directory: `{escape_md2(args)}`\n"
             f"Total: {len(new_dirs)}\\. Use `/add\\-dir clear` to remove all\\.",
         )
@@ -568,7 +616,7 @@ async def handle_command(
     # ── /pr-comments ── (Lane C — legitimate LLM execution)
     if cc_slash == "/pr-comments":
         await update.effective_chat.send_chat_action(action="typing")
-        await update.effective_chat.send_message(f"🔍 Fetching PR comments{(' #' + args) if args else ''}...")
+        await _send_md(update, f"🔍 Fetching PR comments{(' #' + args) if args else ''}...")
         return "Fetch and display all comments from the current GitHub pull request. First run gh pr view to identify the PR, then fetch and show comments."  # /pr-comments
 
     # ── /compact ── (Lane A — session reset in headless mode)
@@ -584,7 +632,7 @@ async def handle_command(
     if cc_slash == "/memory":
         if args:
             await update.effective_chat.send_chat_action(action="typing")
-            await update.effective_chat.send_message(f"🧠 Managing memory: {escape_md2(args[:100])}...")
+            await _send_md(update, f"🧠 Managing memory: {escape_md2(args[:100])}...")
             return f"Manage Command Code memory. {args}\n\nRead AGENTS.md files if needed and make requested changes."  # /memory
         else:
             paths = [
@@ -596,12 +644,12 @@ async def handle_command(
             found = [p for p in paths if p.exists()]
             if found:
                 listing = "\n".join(f"  \\- `{escape_md2(str(p))}`" for p in found)
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     f"🧠 *Memory files found:*\n{listing}\n\n"
                     f"Use `/memory <instruction>` to modify memory\\.",
                 )
             else:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     "🧠 No memory files found\\. Use `/memory <instruction>` to create one\\.",
                 )
             return None
@@ -610,13 +658,13 @@ async def handle_command(
     if cc_slash == "/agents":
         agents_dir = Path.home() / ".commandcode" / "agents"
         if agents_dir.exists():
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 f"🤖 Agent configs stored at `{escape_md2(str(agents_dir))}`\\.\n\n"
                 f"Interactive agent management \\(TUI\\) is not available remotely\\. "
                 f"Describe what you want and I can help set it up via prompt\\.",
             )
         else:
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 "🤖 No agent configurations found\\.\n\n"
                 "Interactive agent management \\(TUI\\) is not available remotely\\. "
                 "Describe what you want and I can help set it up via prompt\\.",
@@ -626,19 +674,19 @@ async def handle_command(
     # ── /init ── (Lane C — legitimate LLM execution)
     if cc_slash == "/init":
         await update.effective_chat.send_chat_action(action="typing")
-        await update.effective_chat.send_message("📄 Initializing AGENTS\\.md\\.\\.\\.")
+        await _send_md(update, "📄 Initializing AGENTS\\.md\\.\\.\\.")
         return "Create or update AGENTS.md for this project based on its structure, tech stack, and conventions."  # /init
 
     # ── /goal ──
     if cc_slash == "/goal":
         if not args:
             if state.goal:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     f"🎯 *Current goal:*\n\n{escape_md2(state.goal)}\n\n"
                     f"_Use `/goal clear` to remove, `/goal <text>` to update\\._",
                 )
             else:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     "🎯 *No goal set\\.*\n\n"
                     "Use `/goal <text>` to set a standing objective the agent works towards across turns\\.\n"
                     "Use `/goal clear` to remove it\\.\n"
@@ -647,15 +695,15 @@ async def handle_command(
             return None
         if args.lower() == "clear":
             session_store.update(chat_id, goal=None)
-            await update.effective_chat.send_message("🎯 Goal cleared\\.")
+            await _send_md(update, "🎯 Goal cleared\\.")
             return None
         if args.lower() == "status":
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 f"🎯 *Goal:* {escape_md2(state.goal)}" if state.goal else "🎯 *No goal set\\.*"
             )
             return None
         session_store.update(chat_id, goal=args)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"🎯 Goal set:\n\n{escape_md2(args)}\n\n"
             f"_This will be prepended to all subsequent prompts until cleared\\._",
         )
@@ -665,7 +713,7 @@ async def handle_command(
     if cc_slash == "/queue":
         if not args:
             if not state.queued_prompts:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     "📋 Queue is empty\\. Use `/queue <prompt>` to queue a prompt for the next turn\\.",
                 )
             else:
@@ -673,11 +721,11 @@ async def handle_command(
                     f"  {i + 1}\\. {escape_md2(p[:80])}"
                     for i, p in enumerate(state.queued_prompts)
                 )
-                await update.effective_chat.send_message(f"📋 *Queued prompts:*\n{items}")
+                await _send_md(update, f"📋 *Queued prompts:*\n{items}")
             return None
         new_queue = list(state.queued_prompts) + [args]
         session_store.update(chat_id, queued_prompts=new_queue)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"📋 Queued prompt ({len(new_queue)} total)\\. "
             f"It will run after the current task completes\\.",
         )
@@ -686,12 +734,12 @@ async def handle_command(
     # ── /undo ── (Lane B — state engineering, no LLM-wrapped instructions)
     if cc_slash == "/undo":
         if not state.last_prompt:
-            await update.effective_chat.send_message("🤷 No previous prompt to undo\\.")
+            await _send_md(update, "🤷 No previous prompt to undo\\.")
             return None
         n = int(args) if (args and args.isdigit()) else 1
         # Reset session state — unwinding the last turn
         session_store.update(chat_id, active=False, one_shot_plan=False)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"↩️ Undoing last {n} turn(s)\\. Re\\-running your prompt with a fresh session state\\.\\.\\."
         )
         # Return the clean last prompt for re-execution (no LLM wrapper text)
@@ -702,7 +750,7 @@ async def handle_command(
         name = args or f"fork_{int(datetime.now().timestamp())}"
         # Save current session snapshot and reset — fork means fresh start
         session_store.update(chat_id, active=False, session_name=name)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"🌿 Session forked as *{escape_md2(name)}*\\.\n\n"
             f"Session state has been reset\\. Your next prompt starts a fresh conversation\\."
         )
@@ -712,21 +760,21 @@ async def handle_command(
     if cc_slash == "/rename":
         if not args:
             if state.session_name:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     f"📝 Current session name: {escape_md2(state.session_name)}",
                 )
             else:
-                await update.effective_chat.send_message(
+                await _send_md(update, 
                     "📝 No session name set\\. Use `/rename <name>` to name this session\\.",
                 )
             return None
         session_store.update(chat_id, session_name=args)
-        await update.effective_chat.send_message(f"📝 Session renamed to: *{escape_md2(args)}*")
+        await _send_md(update, f"📝 Session renamed to: *{escape_md2(args)}*")
         return None
 
     # ── /reload ──
     if cc_slash == "/reload":
-        await update.effective_chat.send_message("🔄 Restarting bot... Session state will be preserved in config\\.")
+        await _send_md(update, "🔄 Restarting bot... Session state will be preserved in config\\.")
         # Just exit — systemd/system manager should restart it
         import os as _os
         _os._exit(0)
@@ -743,7 +791,7 @@ async def handle_command(
     if cc_slash == "/version":
         await update.effective_chat.send_chat_action(action="typing")
         ver = await _run_cli(["--version"], timeout=10)
-        await update.effective_chat.send_message(f"📦 *Command Code* v{escape_md2(ver)}")
+        await _send_md(update, f"📦 *Command Code* v{escape_md2(ver)}")
         return None
 
     # ── /usage ──
@@ -757,13 +805,13 @@ async def handle_command(
             version = "?"
 
         model_name = state.model or "default"
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"╔══ *Usage & Credits* ══\n"
             f"╟ User: {escape_md2(whoami or 'not logged in')}\n"
             f"╟ Version: v{escape_md2(version)}\n"
             f"╟ Model: `{escape_md2(model_name)}`\n"
             f"╟ Max turns: {DEFAULT_MAX_TURNS}\n"
-            f"╟ YOLO: {'on' if state.yolo else 'off'}\\n"
+            f"╟ YOLO: {'on' if state.yolo else 'off'}\n"
             f"╚══ _Detailed usage metrics require the TUI\\. Run `cmd` locally for full breakdown\\._",
         )
         return None
@@ -771,7 +819,7 @@ async def handle_command(
     # ── /update ──
     if cc_slash == "/update":
         await update.effective_chat.send_chat_action(action="typing")
-        await update.effective_chat.send_message("⬆️ Updating Command Code...")
+        await _send_md(update, "⬆️ Updating Command Code...")
         output = await _run_cli(["update"], timeout=120)
         capped = output[:3800] + "\n...(truncated)" if len(output) > 3800 else output
         await _send_chunked(update, f"```\n{escape_md2(capped)}\n```")
@@ -844,7 +892,7 @@ async def handle_command(
         valid_modes = ("default", "aggressive", "gentle")
         if not args:
             current = state.compact_mode or "default"
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 f"🗜️ *Compact mode:* `{escape_md2(current)}`\n\n"
                 f"Available modes: {', '.join(f'`{m}`' for m in valid_modes)}\n\n"
                 f"Use `/compact\\-mode <mode>` to change\\."
@@ -852,20 +900,20 @@ async def handle_command(
             return None
         mode = args.lower()
         if mode not in valid_modes:
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 f"❌ Invalid mode: `{escape_md2(mode)}`\\. "
                 f"Use: {', '.join(f'`{m}`' for m in valid_modes)}\\."
             )
             return None
         session_store.update(chat_id, compact_mode=mode)
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"🗜️ Compact mode set to *{escape_md2(mode)}*\\."
         )
         return None
 
     # ── /courses ──
     if cc_slash == "/courses":
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             "📚 *Command Code Courses*\n\n"
             "[Open courses in browser](https://commandcode\\.ai/courses)\n\n"
             "_Learn how to get the most out of Command Code\\._",
@@ -874,7 +922,7 @@ async def handle_command(
 
     # ── TUI-only ──
     if cc_slash in TUI_ONLY:
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"ℹ️ {cc_slash} is a TUI\\-only command \\(interactive terminal mode\\) "
             f"and cannot be executed remotely\\. Use it in a local `cmd` session\\.",
         )
@@ -882,7 +930,7 @@ async def handle_command(
 
     # ── N/A commands ──
     if cc_slash in NA_CMDS:
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"ℹ️ {cc_slash} is not applicable when using Command Code remotely via Telegram\\.",
         )
         return None
@@ -890,7 +938,7 @@ async def handle_command(
     # ── /cmd ── (Lane C — direct prompt execution)
     if cc_slash == "/cmd":
         if not args:
-            await update.effective_chat.send_message(
+            await _send_md(update, 
                 "Usage: `/cmd <prompt>` — run a prompt through Command Code",
             )
             return None
@@ -898,7 +946,7 @@ async def handle_command(
 
     # Unknown slash command → help
     if not args:
-        await update.effective_chat.send_message(
+        await _send_md(update, 
             f"Unknown command: `{escape_md2(cc_slash)}`\\. Use /help to see available commands\\.",
         )
         return None
