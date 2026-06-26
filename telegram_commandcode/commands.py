@@ -212,8 +212,12 @@ async def handle_command(
     # ── CLI-mapped commands ──
     if cc_slash in CLI_MAP:
         cli_args_base, status_msg = CLI_MAP[cc_slash]
-        # Append user's extra args if any
-        cli_args = cli_args_base + (args.split() if args else ["list"])
+        # Build CLI args: no args → default to "list", with args → use as-is
+        if cc_slash == "/taste" and args:
+            # /taste <name> → cmd taste install <name>
+            cli_args = cli_args_base + ["install"] + args.split()
+        else:
+            cli_args = cli_args_base + (args.split() if args else ["list"])
         await update.effective_chat.send_message(escape_md2(status_msg))
         await update.effective_chat.send_chat_action(action="typing")
         output = await _run_cli(cli_args, timeout=30)
