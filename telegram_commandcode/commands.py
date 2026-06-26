@@ -38,10 +38,15 @@ logger = logging.getLogger(__name__)
 # Map Telegram-safe command names (no hyphens) to real CC slash commands
 TG_TO_CC: dict[str, str] = {
     "add_dir": "/add-dir",
+    "compact_mode": "/compact-mode",
     "compactmode": "/compact-mode",
+    "configure_models": "/configure-models",
     "configuremodels": "/configure-models",
+    "learn_taste": "/learn-taste",
     "learntaste": "/learn-taste",
+    "pr_comments": "/pr-comments",
     "prcomments": "/pr-comments",
+    "terminal_setup": "/terminal-setup",
     "terminalsetup": "/terminal-setup",
 }
 
@@ -566,13 +571,12 @@ async def handle_command(
         await update.effective_chat.send_message(f"🔍 Fetching PR comments{(' #' + args) if args else ''}...")
         return "Fetch and display all comments from the current GitHub pull request. First run gh pr view to identify the PR, then fetch and show comments."  # /pr-comments
 
-    # ── /compact ──
+    # ── /compact ── (Lane A — session reset in headless mode)
     if cc_slash == "/compact":
-        await update.effective_chat.send_message(
-            "ℹ️ In headless mode \\(`cmd \\-p`\\) there's no persistent conversation to compact "
-            "— each prompt starts fresh\\.\n\n"
-            "Use `/clear` to reset your session state \\(model, plan mode, steer\\), "
-            "or just send a new prompt\\.",
+        session_store.reset(chat_id)
+        await _send_chunked(
+            update,
+            "🗜️ Session compacted\\. All state reset \\(model, plan mode, steer, goal\\)\\. Next prompt starts fresh\\.",
         )
         return None
 
