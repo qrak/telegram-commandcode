@@ -276,6 +276,8 @@ async def handle_command(
         output = await _run_cli(cli_args, timeout=30)
         capped = output[:3800] + "\n...(truncated)" if len(output) > 3800 else output
         await _send_chunked(update, f"```\n{escape_md2(capped)}\n```")
+        # Store CLI output as context for follow-up questions
+        session_store.update(chat_id, last_bot_output=capped[:2000])
         return None
 
     # ── /status ──

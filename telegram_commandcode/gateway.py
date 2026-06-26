@@ -546,8 +546,11 @@ async def _process_prompt(
                 bot=bot,
             )
 
-        # Build the full prompt with goal/steer prefixes
+        # Build the full prompt with goal/steer prefixes and recent context
         prefix_parts = []
+        # Inject previous bot output as context so follow-up questions make sense
+        if state.last_bot_output:
+            prefix_parts.append(f"[RECENT CONTEXT — the bot previously said:] {state.last_bot_output[:2000]}")
         if state.goal:
             prefix_parts.append(f"[GOAL] {state.goal}")
         if state.steer:
@@ -588,6 +591,10 @@ async def _process_prompt(
         # Truncate very long outputs
         if len(result_text) > 3800:
             result_text = result_text[:3800] + "\n...(truncated)"
+
+        # Store result for context on next prompt (so follow-ups like "what does that mean?" work)
+        state.last_bot_output = result_text
+        session_store.update(chat_id_str, last_bot_output=result_text[:2000])
 
         done_msg = (
             f"{prefix} *{'Failed' if is_error else 'Done'}:* "
