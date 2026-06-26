@@ -270,17 +270,197 @@ async def run_cmd_streaming(
     """
     Run Command Code CLI and yield stdout lines as they arrive.
 
-    Use this for streaming progress updates — yields each line as it's
-    received, then yields the final CmdResult summary.
+    Real async streaming — reads stdout line-by-line while the process
+    runs.  Use this for displaying live progress to users.
     """
-    result = await run_cmd(prompt, opts, chat_id=chat_id)
+    args = opts.build_args(prompt)
+    cwd = str(opts.cwd or Path.home())
+    env = opts.env or os.environ
 
-    # Yield stdout lines progressively (for streaming display)
-    for line in result.stdout.split("\n"):
-        line = line.strip()
-        if line:
-            yield line
+    if chat_id:
+        await process_tracker.kill(chat_id)
 
-    # Yield the full result
-    if result.is_error:
-        yield f"⚠️ {result.human_reason}: {result.stderr[:500]}"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+        )
+    except (FileNotFoundError, PermissionError) as e:
+        yield f"❌ {e}"
+        return
+
+    if chat_id:
+        process_tracker.register(chat_id, proc)
+
+    stderr_lines: list[str] = []
+
+    async def _read_stderr() -> None:
+        if proc.stderr:
+            async for line in proc.stderr:
+                stderr_lines.append(line.decode("utf-8", errors="replace"))
+    stderr_task = asyncio.create_task(_read_stderr())
+
+    # Read stdout line-by-line, yielding in real time
+    accumulated = ""
+    if proc.stdout:
+        async for line in proc.stdout:
+            decoded = line.decode("utf-8", errors="replace")
+            accumulated += decoded
+            yield decoded
+
+    # Wait for stderr reader and process exit
+    await stderr_task
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=opts.timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        yield f"\n⚠️ Command timed out after {opts.timeout}s.\n"
+    finally:
+        if chat_id:
+            process_tracker.unregister(chat_id)
+
+    # Yield final status
+    stderr_text = "".join(stderr_lines)
+    exit_code = proc.returncode or 0
+
+    if exit_code != 0:
+        reason = EXIT_CODE_REASONS.get(exit_code, f"exit code {exit_code}")
+        if stderr_text.strip():
+            yield f"\n⚠️ {reason}: {stderr_text[:500]}\n"
+        else:
+            yield f"\n⚠️ {reason}\n"
+    elif stderr_text.strip():
+        # Non-fatal stderr
+        yield f"\n{stderr_text[:500]}\n"
+
+
+async def run_cmd_with_progress(
+    prompt: str,
+    opts: ExecOptions,
+    *,
+    chat_id: Optional[str] = None,
+    on_progress=None,          # async callable(batch_text: str) → None
+    batch_interval: float = 1.5,
+    max_preview_chars: int = 1500,
+) -> CmdResult:
+    """
+    Run Command Code CLI with periodic progress callbacks.
+
+    Reads stdout line-by-line and calls ``on_progress`` every
+    *batch_interval* seconds (or when the accumulated buffer reaches a
+    natural paragraph break).  The callback receives the *last*
+    *max_preview_chars* characters of output — suitable for editing a
+    status message in-place.
+
+    Returns a normal CmdResult when the process finishes.
+    """
+    args = opts.build_args(prompt)
+    cwd = str(opts.cwd or Path.home())
+    env = opts.env or os.environ
+
+    if chat_id:
+        await process_tracker.kill(chat_id)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+        )
+    except FileNotFoundError:
+        return CmdResult(
+            stdout="",
+            stderr=f"❌ Command '{DEFAULT_CMD_BIN}' not found.",
+            exit_code=-1,
+        )
+    except PermissionError:
+        return CmdResult(
+            stdout="",
+            stderr=f"❌ Permission denied running '{DEFAULT_CMD_BIN}'.",
+            exit_code=-1,
+        )
+
+    if chat_id:
+        process_tracker.register(chat_id, proc)
+
+    stderr_chunks: list[str] = []
+
+    async def _read_stderr() -> None:
+        if proc.stderr:
+            async for line in proc.stderr:
+                stderr_chunks.append(line.decode("utf-8", errors="replace"))
+
+    stderr_task = asyncio.create_task(_read_stderr())
+
+    accumulated: list[str] = []
+    last_callback = asyncio.get_event_loop().time()
+
+    def _recent_output() -> str:
+        full = "".join(accumulated)
+        if len(full) > max_preview_chars:
+            return "…" + full[-(max_preview_chars - 1):]
+        return full
+
+    try:
+        if proc.stdout:
+            async for line in proc.stdout:
+                decoded = line.decode("utf-8", errors="replace")
+                accumulated.append(decoded)
+
+                now = asyncio.get_event_loop().time()
+                if on_progress and (now - last_callback >= batch_interval):
+                    try:
+                        await on_progress(_recent_output())
+                    except Exception as exc:
+                        logger.debug("Progress callback failed: %s", exc)
+                    last_callback = now
+
+        # Final progress callback with full output
+        if on_progress:
+            try:
+                await on_progress(_recent_output())
+            except Exception:
+                pass
+
+    finally:
+        await stderr_task
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=opts.timeout)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        finally:
+            if chat_id:
+                process_tracker.unregister(chat_id)
+
+    stdout = "".join(accumulated)
+    stderr = "".join(stderr_chunks)
+    exit_code = proc.returncode or 0
+
+    killed_by = None
+    if exit_code < 0:
+        sig_num = -exit_code
+        try:
+            killed_by = signal.Signals(sig_num).name
+        except ValueError:
+            killed_by = f"signal {sig_num}"
+
+    return CmdResult(
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=exit_code,
+        killed_by_signal=killed_by,
+        success=(exit_code == 0 and not killed_by),
+    )

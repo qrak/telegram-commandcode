@@ -37,7 +37,6 @@ class ChatSession:
     session_name: Optional[str] = None  # /rename target
     compact_mode: Optional[str] = None  # /compact-mode strategy (default, aggressive, gentle)
     yolo: bool = True                     # /yolo toggle (--yolo flag)
-    last_bot_output: Optional[str] = None  # Last bot-generated message for context
 
     def to_dict(self) -> dict:
         return asdict(self)

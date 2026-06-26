@@ -34,7 +34,7 @@ from telegram.ext import (
     filters,
 )
 
-from .gateway import handle_message
+from .gateway import BotGateway
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -45,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("telegram-commandcode")
 
-# Quiet some noisy libraries
+# Quiet noisy libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext.Application").setLevel(logging.INFO)
 
@@ -107,30 +107,38 @@ BOT_COMMANDS = [
 ]
 
 
+# ── Singleton gateway ────────────────────────────────────────────────────────
+
+# Created at module level so the same instance handles all updates.
+_gateway = BotGateway()
+
+
+async def _message_handler(update: Update, context) -> None:
+    """PTB message handler — delegates to the BotGateway."""
+    await _gateway.handle_message(update, context)
+
+
 # ── Startup / Shutdown ──────────────────────────────────────────────────────
 
 async def _on_startup(app: Application) -> None:
     """Called when the bot starts. Register commands, verify connection."""
     logger.info("🤖 telegram-commandcode v2 starting...")
 
-    # Verify bot token
     me = await app.bot.get_me()
     logger.info("   Bot: @%s (%s)", me.username, me.first_name)
     logger.info("   CMD: %s", os.getenv("COMMAND_CODE_CMD", "cmd"))
     logger.info("   Access: %s", os.getenv("TELEGRAM_ALLOWED_USERS", "any"))
 
-    # Register commands
     try:
         await app.bot.set_my_commands(BOT_COMMANDS)
         logger.info("   %d commands registered", len(BOT_COMMANDS))
     except Exception as e:
         logger.warning("   ⚠️ Failed to register commands: %s", e)
 
-    # Clear pending updates (avoid processing old messages)
     try:
         updates = await app.bot.get_updates()
         if updates:
-            await app.update_queue.put(None)  # Skip old
+            await app.update_queue.put(None)
             logger.info("   Cleared %d pending updates", len(updates))
     except Exception:
         pass
@@ -139,8 +147,12 @@ async def _on_startup(app: Application) -> None:
 
 
 async def _on_shutdown(app: Application) -> None:
-    """Graceful shutdown — kill all running processes."""
+    """Graceful shutdown — await pending tasks, kill all running processes."""
     logger.info("Shutting down gracefully...")
+
+    # Wait for in-flight prompt executions to finish
+    await _gateway.processor.wait_pending(timeout=10.0)
+
     from .executor import process_tracker
     await process_tracker.kill_all()
     logger.info("Goodbye.")
@@ -149,10 +161,7 @@ async def _on_shutdown(app: Application) -> None:
 # ── Orphan cleanup ──────────────────────────────────────────────────────────
 
 def _kill_orphaned_processes() -> None:
-    """
-    Kill any orphaned `cmd -p` processes from crashed bot instances.
-    Uses `ps` + `kill` on Linux; no-op on other platforms.
-    """
+    """Kill leftover `cmd -p` processes from crashed instances (Linux only)."""
     if sys.platform != "linux":
         return
     try:
@@ -161,9 +170,8 @@ def _kill_orphaned_processes() -> None:
             ["ps", "axo", "pid,args", "--no-headers"],
             capture_output=True, text=True, timeout=5,
         )
-        lines = result.stdout.strip().split("\n")
         killed = 0
-        for line in lines:
+        for line in result.stdout.strip().split("\n"):
             if "grep" in line or "sh -c" in line:
                 continue
             if "cmd" in line and " -p " in line:
@@ -172,28 +180,33 @@ def _kill_orphaned_processes() -> None:
                     try:
                         pid = int(parts[0])
                         os.kill(pid, signal.SIGTERM)
-                        # Best-effort SIGKILL after 2s
                         asyncio.get_event_loop().call_later(
-                            2, lambda p=pid: os.kill(p, signal.SIGKILL) if True else None
+                            2,
+                            lambda p=pid: (
+                                os.kill(p, signal.SIGKILL)
+                                if True
+                                else None
+                            ),
                         )
                         killed += 1
                     except (ValueError, ProcessLookupError, PermissionError):
                         pass
-        if killed > 0:
+        if killed:
             logger.info("   Killed %d orphaned cmd process(es)", killed)
     except Exception:
-        pass  # ps/grep not available — skip
+        pass
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     """Entry point for `telegram-commandcode` console script."""
-    # Validate token
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
-        # Try .env file
-        for env_path in (Path(".env"), Path(__file__).resolve().parent.parent / ".env"):
+        for env_path in (
+            Path(".env"),
+            Path(__file__).resolve().parent.parent / ".env",
+        ):
             try:
                 for line in env_path.read_text().splitlines():
                     if line.startswith("TELEGRAM_BOT_TOKEN="):
@@ -203,13 +216,15 @@ def main() -> None:
                 continue
         if not token:
             print("❌ TELEGRAM_BOT_TOKEN is required.", file=sys.stderr)
-            print("   Set via env var, or create a .env file with: TELEGRAM_BOT_TOKEN=your_token_here", file=sys.stderr)
+            print(
+                "   Set via env var, or create a .env file with: "
+                "TELEGRAM_BOT_TOKEN=your_token_here",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
-    # Cleanup orphans from previous crashed instances
     _kill_orphaned_processes()
 
-    # Build PTB Application
     app: Application = (
         ApplicationBuilder()
         .token(token)
@@ -218,18 +233,18 @@ def main() -> None:
         .build()
     )
 
-    # Register handlers
-    # Message handler for all non-command text (and commands are filtered inside)
-    app.add_handler(MessageHandler(
-        filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VOICE,
-        handle_message,
-    ))
+    # Register all messages through the single gateway handler
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VOICE,
+            _message_handler,
+        )
+    )
 
     # Also register command handlers for Telegram's menu system
     for cmd_name, _desc in BOT_COMMANDS:
-        app.add_handler(CommandHandler(cmd_name, handle_message))
+        app.add_handler(CommandHandler(cmd_name, _message_handler))
 
-    # Start polling
     logger.info("Starting bot with long polling...")
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
