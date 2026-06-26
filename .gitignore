@@ -1,3 +1,11 @@
 node_modules/
 .env
 bot.log
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.ai/

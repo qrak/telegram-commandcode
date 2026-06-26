@@ -1,13 +1,16 @@
-# telegram-commandcode
+# telegram-commandcode v2
 
-**Full Telegram ↔ Command Code bridge** — control your AI coding agent from Telegram and get notifications back.
+**Async Python Telegram bot for Command Code CLI** — Hermes Agent architecture patterns.
+
+Control your AI coding agent from Telegram with streaming progress, persistent sessions,
+and resilient message delivery. Rewritten in Python with `python-telegram-bot` 20.x.
 
 ```
            Telegram
                ↕
     ┌──────────┴──────────┐
-    │  bot.js (daemon)    │  Telegram → Command Code
-    │  index.js (MCP)     │  Command Code → Telegram
+    │  bot.py (gateway)   │  Async Python PTB bot
+    │  index.js (MCP)     │  Node.js MCP server (unchanged)
     └──────────┬──────────┘
                ↕
         command code CLI
@@ -15,229 +18,136 @@
 
 ## Two Modes
 
-| Mode | File | Direction | What it does |
-|---|---|---|---|
-| **MCP Server** | `index.js` | CC → Telegram | Command Code agent sends you messages, files, photos |
-| **Bot Daemon** | `bot.js` | Telegram → CC | You type prompts on Telegram → Command Code executes → result back to Telegram |
+| Mode | File | Language | Direction | Purpose |
+|---|---|---|---|---|
+| **Bot Daemon** | `telegram_commandcode/bot.py` | Python | Telegram → CC | Async gateway with streaming progress |
+| **MCP Server** | `index.js` | Node.js | CC → Telegram | Agent sends messages, files, photos |
 
----
+## Architecture (v2)
 
-## Mode 1: Bot Daemon (Telegram → Command Code)
+```
+telegram_commandcode/
+├── bot.py         # PTB Application — entry point & lifecycle
+├── gateway.py     # Async event router — non-blocking dispatch
+├── commands.py    # 46+ slash command handlers
+├── executor.py    # Async subprocess runner for `cmd`
+├── session.py     # Persistent session state (JSON-backed)
+├── formatter.py   # MarkdownV2 escaping & safe formatting
+├── chunking.py    # Smart 4096-char split + file fallback
+└── __init__.py
+```
 
-Control Command Code from Telegram like you're sitting at the terminal.
+### Key Architectural Patterns
 
-### Setup
+| Pattern | Implementation |
+|---|---|
+| **Decoupled Gateway** | PTB message handler is thin — never blocks. Long work dispatched via `asyncio.create_task()` in per-chat `asyncio.Lock` |
+| **Persistent Sessions** | `ChatSession` dataclass stored in `~/.commandcode/telegram_sessions.json`. Survives restarts |
+| **Streaming Progress** | Edit-in-place: one status message, progressively edited with stages (🤔→✅/❌). No message flooding |
+| **Resilient Chunking** | `SmartSplitter`: splits at paragraph → sentence → word boundaries, capped at 4000 chars. File fallback at 15K chars |
+| **Error Boundaries** | Every `send_message`/`edit_message_text` wrapped with parse-fallback. Reactions are best-effort |
+
+## Quick Install
+
+```bash
+# Clone and install
+git clone https://github.com/qrak/telegram-commandcode.git
+cd telegram-commandcode
+pip install -e "."
+
+# Or with voice transcription support
+pip install -e ".[voice]"
+```
+
+### Requirements
+
+- Python 3.11+
+- `python-telegram-bot[job-queue]>=20.8`
+- Command Code CLI (`cmd`) installed and on PATH
+- (Optional) `openai` for voice transcription
+
+## Setup
 
 ```bash
 # 1. Get bot token from @BotFather
-# 2. Create .env file (or export TELEGRAM_BOT_TOKEN)
-# 3. Start the daemon
-TELEGRAM_ALLOWED_USERS=any node bot.js
+# 2. Set environment variables
+export TELEGRAM_BOT_TOKEN="123456:ABC..."
+export TELEGRAM_ALLOWED_USERS="any"  # or comma-separated user IDs
+
+# 3. Start the bot
+telegram-commandcode
+# or: python -m telegram_commandcode.bot
 ```
 
-Or via npx:
-```bash
-TELEGRAM_ALLOWED_USERS=any npx telegram-commandcode-bot
-```
-
-### systemd service (persistent across reboots)
-
-```bash
-# Create user service
-cat > ~/.config/systemd/user/telegram-commandcode-bot.service << 'EOF'
-[Unit]
-Description=Telegram Command Code Bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/path/to/node /home/user/telegram-commandcode/bot.js
-WorkingDirectory=/home/user/telegram-commandcode
-Environment="PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
-Environment="TELEGRAM_BOT_TOKEN=your_token"
-Environment="COMMAND_CODE_YOLO=true"
-Environment="COMMAND_CODE_MAX_TURNS=20"
-Restart=always
-RestartSec=5
-KillMode=mixed
-KillSignal=SIGTERM
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=default.target
-EOF
-
-# Enable lingering (so user services start at boot)
-loginctl enable-linger $USER
-
-# Enable and start
-systemctl --user daemon-reload
-systemctl --user enable telegram-commandcode-bot.service
-systemctl --user start telegram-commandcode-bot.service
-
-# Check logs
-journalctl --user -u telegram-commandcode-bot.service -f
-```
-
-### Env vars
+### Env Vars
 
 | Variable | Default | Description |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from @BotFather (or `.env` file) |
-| `TELEGRAM_ALLOWED_USERS` | `any` | Comma-separated user IDs for access control |
+| `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from @BotFather |
+| `TELEGRAM_ALLOWED_USERS` | `any` | Comma-separated user IDs |
 | `COMMAND_CODE_CMD` | `cmd` | Path to Command Code binary |
-| `COMMAND_CODE_YOLO` | `true` | `false` → read-only mode (no file writes/shell) |
+| `COMMAND_CODE_YOLO` | `true` | `false` → read-only mode |
 | `COMMAND_CODE_MAX_TURNS` | `20` | Max conversation turns per prompt |
-| `OPENAI_API_KEY` | *(optional)* | Required for voice message transcription (Whisper API) |
+| `OPENAI_API_KEY` | *(optional)* | For voice message transcription |
 
-Both `index.js` and `bot.js` auto-load `TELEGRAM_BOT_TOKEN` from a `.env` file in the current directory or script directory — no need to export it manually.
+### systemd Service (persistent)
 
-The daemon supports **multiple concurrent users** — each user gets their own session state (model selection, plan mode, conversation context).
+```ini
+# ~/.config/systemd/user/telegram-commandcode.service
+[Unit]
+Description=Telegram Command Code Bot
+After=network-online.target
 
-### Features
+[Service]
+Type=simple
+ExecStart=/home/user/.local/bin/telegram-commandcode
+Environment="TELEGRAM_BOT_TOKEN=your_token"
+Environment="COMMAND_CODE_YOLO=true"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now telegram-commandcode.service
+```
+
+## Features
 
 | Feature | Description |
 |---|---|
-| **👀 Reactions** | Bot reacts with 👀 while processing, ✅ on success, ❌ on error |
-| **📷 Photo reception** | Send photos to the bot — they're downloaded and the path is passed to `cmd` |
-| **📄 File reception** | Send documents — same flow, downloaded to `/tmp/telegram-cmd/` |
-| **🎤 Voice transcription** | Voice messages transcribed via OpenAI Whisper (requires `OPENAI_API_KEY`) |
-| **📎 Auto-send files** | File paths in `cmd` output are automatically uploaded as Telegram attachments |
-| **👥 Group chat** | Bot responds when @mentioned or replied to in groups |
-| **✏️ Single-message streaming** | Status message shows live output as it arrives, then finalizes with ✅/⚠️ |
-| **🔄 Session chaining** | `/resume` reads actual CC session history, `/clear` starts fresh |
-| **🎯 Goal tracking** | `/goal <text>` sets a standing objective prepended to all prompts |
-| **🧭 Mid-session steering** | `/steer <text>` injects guidance into all subsequent prompts |
-| **📋 Prompt queueing** | `/queue <prompt>` queues for next turn, auto-drains after completion |
-| **🔄 Background tasks** | `/background <prompt>` runs detached, notifies on completion |
-| **⚙️ Config persistence** | Model, provider, and effort settings persist to `~/.commandcode/config.json` |
-| **🔘 Interactive model picker** | `/model` shows inline keyboard buttons for top models |
-| **🗂️ Categorized help** | `/help` groups commands by category (Session, Models, System, etc.) |
-| **ℹ️ About command** | `/about` shows bot info, stack, and source link |
+| 👀 **Reactions** | 👀 while processing, ✅ on success, ❌ on error |
+| 📷 **Photo reception** | Photos downloaded and passed to `cmd` |
+| 📄 **File reception** | Documents sent to `/tmp/telegram-cmd/` |
+| 🎤 **Voice transcription** | OpenAI Whisper (requires `OPENAI_API_KEY`) |
+| 📎 **Auto-send files** | `MEDIA:/path` in output → auto-attached |
+| 👥 **Group chat** | Responds when @mentioned or replied to |
+| ✏️ **Single-message editing** | Status message edited in-place — no chat clutter |
+| 🔄 **Session chaining** | `/resume` reads CC session history |
+| 🎯 **Goal tracking** | `/goal <text>` sets standing objective |
+| 🧭 **Mid-session steering** | `/steer <text>` guides all subsequent prompts |
+| 📋 **Prompt queueing** | `/queue <prompt>` queues for next turn |
+| 🔄 **Background tasks** | `/background <prompt>` runs detached |
+| ⚙️ **Config persistence** | Model/provider/effort persist to `~/.commandcode/config.json` |
 
-### Slash Commands
+## Slash Commands
 
-Type `/` in the Telegram message box — **all 49 commands** are registered:
+All 46+ commands from the Node.js version are implemented. Type `/` in Telegram to see the menu.
 
-**🟢 CLI-mapped (run directly)**
+**CLI-mapped**: `/feedback`, `/learntaste`, `/login`, `/logout`, `/mcp`, `/skills`, `/taste`, `/info`, `/version`, `/update`
 
-| Command | Action | Maps to |
-|---|---|---|
-| `/feedback <msg>` | Submit feedback | `cmd feedback` |
-| `/learntaste` | Learn taste from other agents | `cmd learn-taste` |
-| `/login` | Authenticate | `cmd login` |
-| `/logout` | Remove auth | `cmd logout` |
-| `/mcp [list/add/remove]` | Manage MCP servers | `cmd mcp` |
-| `/skills [list/add/remove]` | Manage skills | `cmd skills` |
-| `/taste [list/push/pull]` | Manage taste | `cmd taste` |
-| `/info` | System information | `cmd info` |
-| `/version` | Show version | `cmd --version` |
-| `/update` | Update Command Code | `cmd update` |
+**Config & session**: `/status`, `/model`, `/effort`, `/provider`, `/add-dir`, `/goal`, `/steer`, `/plan`, `/compact-mode`, `/configure-models`, `/context`
 
-**⚙️ Config & session management**
+**Session control**: `/resume`, `/clear`, `/new`, `/fork`, `/rename`, `/undo`, `/retry`, `/queue`, `/background`, `/stop`, `/reload`
 
-| Command | Action |
-|---|---|
-| `/status` | Show model, goal, steer, session, config overview |
-| `/model [name]` | List models or switch (persists to config.json) |
-| `/effort <level>` | Set reasoning effort: low, medium, high, xhigh, max (also `/reasoning`, `/reason`) |
-| `/provider <name>` | Switch AI provider (persists to config.json) |
-| `/add-dir <path>` | Add directory to workspace context (passed as `--add-dir`) |
-| `/goal <text\|clear\|status>` | Set standing objective prepended to all prompts |
-| `/steer <text\|clear>` | Mid-session guidance prepended to all prompts |
-| `/plan [task]` | Toggle plan mode or `/plan <task>` for one-shot |
-| `/compact-mode <mode>` | Set compact mode via prompt |
-| `/configure-models` | Configure model per built-in task |
-| `/context` | Show context window usage |
+**Prompt-based**: `/review`, `/init`, `/memory`, `/pr-comments`, `/agents`, `/cmd`
 
-**🔄 Session control**
+## MCP Server (unchanged)
 
-| Command | Action |
-|---|---|
-| `/resume` | Resume last session (reads CC session history from `~/.commandcode/projects/`) |
-| `/clear` `/new` | Fresh session (reset model, plan, goal, steer) |
-| `/fork [name]` | Fork conversation into new session |
-| `/rename <name>` | Name the current session |
-| `/undo [N]` | Re-run last prompt with adjusted context |
-| `/retry` | Re-run the last prompt |
-| `/queue <prompt>` | Queue prompt for next turn (auto-drains after current task) |
-| `/background <prompt>` | Run task in background, notify on completion |
-| `/stop` | Kill running process |
-| `/reload` | Restart bot (preserves model in config) |
-
-**📝 Prompt-based commands**
-
-| Command | Action |
-|---|---|
-| `/review <PR#>` | Review a pull request |
-| `/init` | Create/update AGENTS.md |
-| `/memory [instruction]` | Show AGENTS.md or manage memory via prompt |
-| `/pr-comments [PR#]` | Fetch PR comments via `gh` |
-| `/agents` | Show agent config info |
-| `/compact` | Explains headless mode limitation (suggests `/clear`) |
-| `/cmd <prompt>` | Explicit prompt alias |
-
-**ℹ️ Info**
-
-| Command | Action |
-|---|---|
-| `/whoami` | Show your Telegram user info |
-| `/usage` | Show credits, plan, model, config |
-| `/courses` | Link to Command Code courses |
-| `/help` | List all commands |
-
-**ℹ️ TUI-only (local terminal required)**
-
-`/ide` · `/rewind` · `/terminal-setup`
-
-**⛔ N/A remotely**
-
-`/exit` · `/share` · `/unshare`
-
-### Usage
-
-```
-You (Telegram):  Build a CLI that tells the date, using TypeScript
-Bot:             🚀 Running: `Build a CLI that tells the date...`
-                 ✅ Done: Built date-cli with TypeScript, tsup, vitest...
-
-You:             /resume
-Bot:             🔄 Resuming last headless session...
-                 📋 *Session resumed:* The previous task was building a date CLI...
-
-You:             /clear
-Bot:             🧹 Session cleared. Next prompt starts fresh.
-
-You:             /status
-Bot:             🔧 Command Code Status
-                   Binary: `cmd`
-                   Auth: qrak
-                   Session: active (use /resume, /clear)
-                   YOLO mode: on (all tools)
-                   Max turns: 20
-```
-
-### How it works
-
-1. Daemon polls Telegram via `getUpdates` (long polling, 30s timeout)
-2. Incoming message → bot adds 👀 reaction, sends a status message
-3. `cmd -p "prompt" --yolo --max-turns 20` runs headless
-4. **Output is streamed live** — response chunks appear in the status message as `cmd` produces them, updated every ~500ms
-5. Status message **finalizes** with `✅ Done:` (success) or `⚠️ Failed:` (error) prefix
-6. Reaction changes to ✅ (success) or ❌ (error)
-7. File paths detected in output are auto-sent as Telegram attachments
-8. Session chaining via `cmd -p --continue` (context preserved between messages)
-9. `/clear` drops `--continue` → fresh session
-
----
-
-## Mode 2: MCP Server (Command Code → Telegram)
-
-Let your Command Code agent send you notifications while it works.
-
-### Register in Command Code
+The Node.js MCP server (`index.js`) remains for Command Code → Telegram direction:
 
 ```bash
 cmd mcp add telegram \
@@ -245,94 +155,6 @@ cmd mcp add telegram \
   -e TELEGRAM_DEFAULT_CHAT_ID=1141080547 \
   -- npx github:qrak/telegram-commandcode
 ```
-
-### MCP Tools
-
-| Tool | What it does |
-|---|---|
-| `telegram_send_message` | Send a text message (MarkdownV2 or HTML, auto-fallback to plain text on parse error) |
-| `telegram_send_photo` | Send a photo (URL or local file) |
-| `telegram_send_file` | Send any file/document |
-| `telegram_get_updates` | Read recent incoming messages (with offset tracking — no duplicates) |
-| `telegram_send_reaction` | Set emoji reaction on a message (👀 ✅ ❌ 👍 ❤️) |
-| `telegram_download_file` | Download a file from Telegram by file_id, returns local path |
-| `telegram_health` | Check bot connection: name, username, status |
-
-### Usage
-
-```
-> Run the build, and if it passes send "✅ Build OK" to Telegram
-
-  [Command Code builds...]
-  Using telegram tool: telegram_send_message
-  → You get notified on your phone 📱
-```
-
----
-
-## Running Both
-
-Use both modes for full two-way interaction:
-
-```bash
-# Terminal 1 — Telegram → Command Code daemon
-TELEGRAM_BOT_TOKEN=*** node bot.js
-
-# Terminal 2 — Register MCP in your project
-cd my-project
-cmd mcp add telegram -e TELEGRAM_BOT_TOKEN=*** -- node index.js
-cmd  # start interactive session
-```
-
-Now you can:
-- Send prompts from your phone → executed by `cmd`
-- Agent sends you notifications when done
-- `/resume` to continue sessions from anywhere
-
----
-
-## Quick Install
-
-```bash
-# Clone
-git clone https://github.com/qrak/telegram-commandcode.git
-cd telegram-commandcode
-npm install
-
-# Optional: create .env from template
-cp .env.example .env
-# Edit .env with your TELEGRAM_BOT_TOKEN
-
-# Bot daemon
-TELEGRAM_ALLOWED_USERS=any node bot.js
-
-# MCP server (for Command Code registration)
-TELEGRAM_BOT_TOKEN=*** node index.js
-```
-
-Or via npx (without cloning):
-```bash
-# Bot daemon (Telegram → Command Code)
-TELEGRAM_ALLOWED_USERS=any npx telegram-commandcode-bot
-
-# MCP server (Command Code → Telegram)
-cmd mcp add telegram -e TELEGRAM_BOT_TOKEN=*** -- npx telegram-commandcode
-```
-
----
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `TELEGRAM_BOT_TOKEN not set` | Export it or create `.env` file from `.env.example` |
-| `cmd: command not found` | Command Code not installed: `npm i -g command-code` |
-| Bot doesn't respond | Check `TELEGRAM_ALLOWED_USERS` — your user ID must be in the list |
-| Session context lost | Use `/resume` (not `/clear`) to keep context between messages |
-| File not found (MCP) | Use absolute paths. For project files: `/home/user/project/file.pdf` |
-| Exit code 3 (auth) | Run `cmd login` on the machine first |
-| Messages fail to send (MCP) | Check Telegram API limits. Retries with exponential backoff on 429/502/503 |
-| Markdown formatting broken | Messages auto-fallback to plain text if Telegram rejects malformed formatting |
 
 ## License
 
