@@ -7,6 +7,7 @@ Telegram updates without blocking on execution.
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Optional
 
 from telegram import Update
@@ -21,11 +22,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Allowed users list from env
-ALLOWED_USERS = __import__("os").getenv("TELEGRAM_ALLOWED_USERS", "any").split(",")
-
 # Global command router instance (lightweight, stateless after init)
 _command_router = CommandRouter()
+
+
+def allowed_users() -> set[str]:
+    """Read the allow-list at call time (so tests and restarts can change it).
+
+    An empty value means "locked": nobody is allowed and the bot replies with
+    the caller's numeric id so they can add it. This is deliberately fail-closed
+    — the bot drives an agent that can edit files and run commands.
+    """
+    raw = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
+    if not raw:
+        return set()
+    return {part.strip() for part in raw.split(",") if part.strip()}
 
 
 class MessageRouter:
@@ -60,19 +71,26 @@ class MessageRouter:
             if not self._should_respond_in_group(msg):
                 return
 
-        # ── Access control ──
+        # ── Access control (fail-closed) ──
         if not self._is_allowed(user_id):
             username = (
-                msg.from_user.username
-                or msg.from_user.first_name
-                or "unknown"
+                (msg.from_user.username or msg.from_user.first_name or "unknown")
                 if msg.from_user
                 else "unknown"
             )
             logger.info("⛔ Blocked message from user %s (%s)", user_id, username)
+            lock_note = (
+                ""
+                if allowed_users()
+                else (
+                    f"\n\nThis bot has no allow-list configured\\. "
+                    f"Your numeric user id is `{user_id}` — add it to "
+                    f"`TELEGRAM_ALLOWED_USERS` and restart\\."
+                )
+            )
             await self.gw.sender.send_message(
                 chat_id,
-                "⛔ Sorry, you are not authorized to use this bot\\.",
+                "⛔ Sorry, you are not authorized to use this bot\\." + lock_note,
                 bot=context.bot,
             )
             return
@@ -148,9 +166,10 @@ class MessageRouter:
     def _is_allowed(user_id: int | None) -> bool:
         if not user_id:
             return False
-        if "any" in [a.strip() for a in ALLOWED_USERS]:
+        allowed = allowed_users()
+        if "any" in allowed:
             return True
-        return str(user_id) in [a.strip() for a in ALLOWED_USERS]
+        return str(user_id) in allowed
 
     def _should_respond_in_group(self, msg) -> bool:
         """Only respond in groups when @mentioned or replied to."""

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "telegram-commandcode"
-version = "2.0.0"
+version = "2.1.0"
 description = "Async Python Telegram bot bridging Telegram ↔ Command Code CLI — Hermes Agent architecture patterns"
 authors = [{ name = "qrak" }]
 license = { text = "MIT" }
@@ -17,9 +17,15 @@ dependencies = [
 
 [project.optional-dependencies]
 voice = ["openai>=1.0"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [project.scripts]
 telegram-commandcode = "telegram_commandcode.bot:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["telegram_commandcode"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::SyntaxWarning"]

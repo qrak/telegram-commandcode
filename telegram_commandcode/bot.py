@@ -18,10 +18,8 @@ Environment:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import signal
 import sys
 from pathlib import Path
 
@@ -57,18 +55,17 @@ BOT_COMMANDS = [
     ("agents", "Show agent configuration info"),
     ("background", "Run a task in background: /background <prompt>"),
     ("clear", "Clear conversation history (fresh start)"),
+    ("cmd", "Run a raw prompt or shell command: /cmd <text>"),
     ("compact", "Compact conversation history"),
     ("compact_mode", "Select compact mode: /compact-mode <mode>"),
     ("configure_models", "Choose model per task: /configure-models"),
     ("context", "Show context window usage"),
     ("courses", "Open Command Code courses in browser"),
     ("effort", "Set reasoning effort: /effort <low|medium|high|xhigh|max>"),
-    ("exit", "Exit session (N/A remotely)"),
     ("feedback", "Submit feedback about Command Code"),
     ("fork", "Fork conversation into new session"),
     ("goal", "Set objective: /goal <text|clear|status>"),
     ("help", "Show available commands"),
-    ("ide", "Connect IDE — local only"),
     ("info", "Show system information"),
     ("init", "Initialize AGENTS.md for this project"),
     ("learn_taste", "Learn taste from other agents"),
@@ -82,23 +79,20 @@ BOT_COMMANDS = [
     ("pr_comments", "Fetch PR comments for current branch"),
     ("provider", "Set AI provider: /provider <name>"),
     ("queue", "Queue prompt for next turn: /queue <prompt>"),
+    ("reason", "Set reasoning level: /reason <level>"),
     ("reasoning", "Set reasoning effort (alias for /effort)"),
     ("reload", "Restart bot and resume session"),
     ("rename", "Rename current session: /rename <name>"),
     ("resume", "Resume a past conversation"),
     ("retry", "Re-run the last prompt"),
     ("review", "Review a pull request: /review or /review <pr>"),
-    ("rewind", "Restore to previous checkpoint (TUI only)"),
-    ("share", "Share conversation — N/A remotely"),
     ("skills", "Browse and manage agent skills"),
     ("start", "Start the bot"),
     ("status", "Show environment status (model, session, config)"),
     ("steer", "Give mid-session guidance: /steer <instruction>"),
     ("stop", "Stop the running agent"),
     ("taste", "Manage Taste learning"),
-    ("terminal_setup", "VSCode keybindings — local only"),
     ("undo", "Back up N turns and re-prompt: /undo [N]"),
-    ("unshare", "Stop sharing — N/A remotely"),
     ("update", "Update Command Code to latest version"),
     ("usage", "Show credits, plan, and usage metrics"),
     ("version", "Show Command Code version"),
@@ -158,45 +152,6 @@ async def _on_shutdown(app: Application) -> None:
     logger.info("Goodbye.")
 
 
-# ── Orphan cleanup ──────────────────────────────────────────────────────────
-
-def _kill_orphaned_processes() -> None:
-    """Kill leftover `cmd -p` processes from crashed instances (Linux only)."""
-    if sys.platform != "linux":
-        return
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["ps", "axo", "pid,args", "--no-headers"],
-            capture_output=True, text=True, timeout=5,
-        )
-        killed = 0
-        for line in result.stdout.strip().split("\n"):
-            if "grep" in line or "sh -c" in line:
-                continue
-            if "cmd" in line and " -p " in line:
-                parts = line.strip().split()
-                if parts:
-                    try:
-                        pid = int(parts[0])
-                        os.kill(pid, signal.SIGTERM)
-                        asyncio.get_event_loop().call_later(
-                            2,
-                            lambda p=pid: (
-                                os.kill(p, signal.SIGKILL)
-                                if True
-                                else None
-                            ),
-                        )
-                        killed += 1
-                    except (ValueError, ProcessLookupError, PermissionError):
-                        pass
-        if killed:
-            logger.info("   Killed %d orphaned cmd process(es)", killed)
-    except Exception:
-        pass
-
-
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -222,8 +177,6 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-
-    _kill_orphaned_processes()
 
     app: Application = (
         ApplicationBuilder()

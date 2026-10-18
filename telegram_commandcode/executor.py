@@ -24,8 +24,20 @@ logger = logging.getLogger(__name__)
 # Default values
 DEFAULT_CMD_BIN = os.getenv("COMMAND_CODE_CMD", "cmd")
 DEFAULT_TIMEOUT = 600  # 10 minutes
-DEFAULT_MAX_TURNS = int(os.getenv("COMMAND_CODE_MAX_TURNS", "20"))
+
+
+def _int_env(name: str, default: int) -> int:
+    """Parse an int env var without crashing the whole bot on a typo."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s, falling back to %s", name, default)
+        return default
+
+
+DEFAULT_MAX_TURNS = _int_env("COMMAND_CODE_MAX_TURNS", 20)
 DEFAULT_YOLO = os.getenv("COMMAND_CODE_YOLO", "true").lower() != "false"
+DEFAULT_WORKDIR = os.getenv("COMMAND_CODE_WORKDIR", "").strip()
 
 EXIT_CODE_REASONS: dict[int, str] = {
     0: "success",
@@ -82,7 +94,7 @@ class ExecOptions:
 
     def build_args(self, prompt: str) -> list[str]:
         """Build the command argument list."""
-        args = [DEFAULT_CMD_BIN, "-p", prompt]
+        args = [DEFAULT_CMD_BIN]
 
         if self.yolo:
             args.append("--yolo")
@@ -98,7 +110,24 @@ class ExecOptions:
         for d in self.add_dirs:
             args.extend(("--add-dir", d))
 
+        # The prompt goes last so a prompt starting with "-" is not parsed as
+        # a flag, and so flags are never swallowed by the prompt argument.
+        args.extend(("-p", prompt))
         return args
+
+
+def _workdir(opts: "ExecOptions") -> str:
+    """Resolve the directory the agent runs in.
+
+    Defaults to the directory the bot was started from (usually the project),
+    never to the user's home directory: running an agent in $HOME is how it
+    ends up editing unrelated files.
+    """
+    if opts.cwd:
+        return str(opts.cwd)
+    if DEFAULT_WORKDIR:
+        return DEFAULT_WORKDIR
+    return str(Path.cwd())
 
 
 class RunningProcessTracker:
@@ -134,8 +163,12 @@ class RunningProcessTracker:
             return False
 
         try:
-            proc.send_signal(signal.SIGINT)
-        except ProcessLookupError:
+            if os.name == "nt":
+                # Windows has no SIGINT delivery to another process group.
+                proc.terminate()
+            else:
+                proc.send_signal(signal.SIGINT)
+        except (ProcessLookupError, PermissionError):
             return False
 
         # Escalate to SIGKILL after 3 seconds
@@ -157,8 +190,11 @@ class RunningProcessTracker:
         for proc in list(self._bg_processes):
             if proc.returncode is None:
                 try:
-                    proc.send_signal(signal.SIGINT)
-                except ProcessLookupError:
+                    if os.name == "nt":
+                        proc.terminate()
+                    else:
+                        proc.send_signal(signal.SIGINT)
+                except (ProcessLookupError, PermissionError):
                     pass
             self._bg_processes.discard(proc)
 
@@ -186,7 +222,7 @@ async def run_cmd(
         await process_tracker.kill(chat_id)
 
     args = opts.build_args(prompt)
-    cwd = str(opts.cwd or Path.home())
+    cwd = _workdir(opts)
     env = opts.env or os.environ
 
     logger.debug("Running: %s (cwd=%s)", " ".join(args), cwd)
@@ -274,7 +310,7 @@ async def run_cmd_streaming(
     runs.  Use this for displaying live progress to users.
     """
     args = opts.build_args(prompt)
-    cwd = str(opts.cwd or Path.home())
+    cwd = _workdir(opts)
     env = opts.env or os.environ
 
     if chat_id:
@@ -303,28 +339,50 @@ async def run_cmd_streaming(
                 stderr_lines.append(line.decode("utf-8", errors="replace"))
     stderr_task = asyncio.create_task(_read_stderr())
 
-    # Read stdout line-by-line, yielding in real time
+    # Read stdout line-by-line, yielding in real time. Every read is bounded by
+    # an absolute deadline: a process that hangs with stdout open must not hang
+    # the bot forever.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + opts.timeout
     accumulated = ""
-    if proc.stdout:
-        async for line in proc.stdout:
-            decoded = line.decode("utf-8", errors="replace")
-            accumulated += decoded
-            yield decoded
-
-    # Wait for stderr reader and process exit
-    await stderr_task
+    timed_out = False
 
     try:
-        await asyncio.wait_for(proc.wait(), timeout=opts.timeout)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        yield f"\n⚠️ Command timed out after {opts.timeout}s.\n"
+        if proc.stdout:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace")
+                accumulated += decoded
+                yield decoded
+
+        if not timed_out:
+            await stderr_task
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=max(deadline - loop.time(), 0.1))
+            except asyncio.TimeoutError:
+                timed_out = True
+
+        if timed_out:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            yield f"\n⚠️ Command timed out after {opts.timeout}s.\n"
     finally:
         if chat_id:
             process_tracker.unregister(chat_id)
+        if not stderr_task.done():
+            stderr_task.cancel()
 
     # Yield final status
     stderr_text = "".join(stderr_lines)
@@ -362,7 +420,7 @@ async def run_cmd_with_progress(
     Returns a normal CmdResult when the process finishes.
     """
     args = opts.build_args(prompt)
-    cwd = str(opts.cwd or Path.home())
+    cwd = _workdir(opts)
     env = opts.env or os.environ
 
     if chat_id:
@@ -402,7 +460,10 @@ async def run_cmd_with_progress(
     stderr_task = asyncio.create_task(_read_stderr())
 
     accumulated: list[str] = []
-    last_callback = asyncio.get_event_loop().time()
+    loop = asyncio.get_running_loop()
+    last_callback = loop.time()
+    deadline = loop.time() + opts.timeout
+    timed_out = False
 
     def _recent_output() -> str:
         full = "".join(accumulated)
@@ -412,11 +473,23 @@ async def run_cmd_with_progress(
 
     try:
         if proc.stdout:
-            async for line in proc.stdout:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
+                if not line:
+                    break
+
                 decoded = line.decode("utf-8", errors="replace")
                 accumulated.append(decoded)
 
-                now = asyncio.get_event_loop().time()
+                now = loop.time()
                 if on_progress and (now - last_callback >= batch_interval):
                     try:
                         await on_progress(_recent_output())
@@ -424,18 +497,24 @@ async def run_cmd_with_progress(
                         logger.debug("Progress callback failed: %s", exc)
                     last_callback = now
 
-        # Final progress callback with full output
-        if on_progress:
+        # Final progress callback with the remaining output
+        if on_progress and not timed_out:
             try:
                 await on_progress(_recent_output())
             except Exception:
                 pass
 
     finally:
+        if timed_out:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
         await stderr_task
 
         try:
-            await asyncio.wait_for(proc.wait(), timeout=opts.timeout)
+            await asyncio.wait_for(proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             try:
                 proc.kill()

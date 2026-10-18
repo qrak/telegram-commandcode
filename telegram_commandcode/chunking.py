@@ -77,7 +77,7 @@ _CHUNK_INDICATOR_ON_FENCE_RE = re.compile(
 
 
 def _separate_chunk_indicator_from_fence(text: str) -> str:
-    """Move ``(N/M)`` chunk markers off Telegram code-fence lines.
+    r"""Move ``(N/M)`` chunk markers off Telegram code-fence lines.
 
     ``truncate_message()`` appends chunk indicators to the end of a chunk. When
     the chunk had to close an in-progress fenced code block, that creates a
@@ -95,7 +95,7 @@ def truncate_message(
     *,
     len_fn: Callable[[str], int] = utf16_len,
 ) -> List[str]:
-    """Split a long message into Telegram-safe chunks.
+    r"""Split a long message into Telegram-safe chunks.
 
     Code-block-aware: when a split falls inside a triple-backtick code block,
     the fence is closed at the end of the current chunk and reopened (with the
