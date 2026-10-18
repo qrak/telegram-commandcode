@@ -1,11 +1,23 @@
+# Node
 node_modules/
-.env
-bot.log
+npm-debug.log*
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.egg-info/
-dist/
+.venv/
+.audit-venv/
 build/
+dist/
+.pytest_cache/
+
+# Local config and secrets
+.env
+*.local
+bot.log
+*.log
+
+# Agent scratch
 .ai/
+.tmp*

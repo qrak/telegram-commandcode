@@ -1,161 +1,199 @@
-# telegram-commandcode v2
+# telegram-commandcode
 
-**Async Python Telegram bot for Command Code CLI** — Hermes Agent architecture patterns.
+**Telegram for your coding agent.** An MCP server that lets Claude Code, Cursor,
+Codex CLI, Command Code or any other MCP client send you messages, files,
+photos and progress updates — and read your replies back.
 
-Control your AI coding agent from Telegram with streaming progress, persistent sessions,
-and resilient message delivery. Rewritten in Python with `python-telegram-bot` 20.x.
-
-```
-           Telegram
-               ↕
-    ┌──────────┴──────────┐
-    │  bot.py (gateway)   │  Async Python PTB bot
-    │  index.js (MCP)     │  Node.js MCP server (unchanged)
-    └──────────┬──────────┘
-               ↕
-        command code CLI
-```
-
-## Two Modes
-
-| Mode | File | Language | Direction | Purpose |
-|---|---|---|---|---|
-| **Bot Daemon** | `telegram_commandcode/bot.py` | Python | Telegram → CC | Async gateway with streaming progress |
-| **MCP Server** | `index.js` | Node.js | CC → Telegram | Agent sends messages, files, photos |
-
-## Architecture (v2)
+[![CI](https://github.com/qrak/telegram-commandcode/actions/workflows/ci.yml/badge.svg)](https://github.com/qrak/telegram-commandcode/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](package.json)
 
 ```
-telegram_commandcode/
-├── bot.py         # PTB Application — entry point & lifecycle
-├── gateway.py     # Async event router — non-blocking dispatch
-├── commands.py    # 46+ slash command handlers
-├── executor.py    # Async subprocess runner for `cmd`
-├── session.py     # Persistent session state (JSON-backed)
-├── formatter.py   # MarkdownV2 escaping & safe formatting
-├── chunking.py    # Smart 4096-char split + file fallback
-└── __init__.py
+   your agent ──MCP stdio──▶ telegram-commandcode ──HTTPS──▶ Telegram ──▶ your phone
+        ▲                                                                     │
+        └────────────────────── reply via getUpdates ◀───────────────────────┘
 ```
 
-### Key Architectural Patterns
+The repository contains two independent pieces:
 
-| Pattern | Implementation |
-|---|---|
-| **Decoupled Gateway** | PTB message handler is thin — never blocks. Long work dispatched via `asyncio.create_task()` in per-chat `asyncio.Lock` |
-| **Persistent Sessions** | `ChatSession` dataclass stored in `~/.commandcode/telegram_sessions.json`. Survives restarts |
-| **Streaming Progress** | Edit-in-place: one status message, progressively edited with stages (🤔→✅/❌). No message flooding |
-| **Resilient Chunking** | `SmartSplitter`: splits at paragraph → sentence → word boundaries, capped at 4000 chars. File fallback at 15K chars |
-| **Error Boundaries** | Every `send_message`/`edit_message_text` wrapped with parse-fallback. Reactions are best-effort |
+| Piece | Direction | Language | What it does |
+|---|---|---|---|
+| **MCP server** (`index.js`) | agent → Telegram | Node | Seven tools: send message / photo / file, read updates, react, download, health check |
+| **Bot daemon** (`telegram_commandcode/`) | Telegram → agent | Python | Chat with the local `cmd` CLI from your phone: 47 commands, streaming output, persistent sessions |
 
-## Quick Install
+You can use either one alone. The MCP server is the part that works with every
+agent; the daemon is specific to the Command Code CLI.
+
+## Quick start — MCP server
+
+You need a bot token from [@BotFather](https://t.me/BotFather) and your numeric
+chat id (send the bot a message, then read `chat.id` from
+`https://api.telegram.org/bot<TOKEN>/getUpdates`).
+
+### Command Code
 
 ```bash
-# Clone and install
+cmd mcp add telegram \
+  -e TELEGRAM_BOT_TOKEN=<token> \
+  -e TELEGRAM_DEFAULT_CHAT_ID=<chat_id> \
+  -- npx -y github:qrak/telegram-commandcode
+```
+
+### Claude Code
+
+```bash
+claude mcp add telegram \
+  -e TELEGRAM_BOT_TOKEN=<token> \
+  -e TELEGRAM_DEFAULT_CHAT_ID=<chat_id> \
+  -- npx -y github:qrak/telegram-commandcode
+```
+
+### Cursor / other MCP clients
+
+Add a stdio server with the command `npx` and arguments
+`["-y", "github:qrak/telegram-commandcode"]`, plus the two environment
+variables above (`~/.cursor/mcp.json` for Cursor).
+
+Restart the agent, then ask it to call `telegram_health`. You should get your
+bot's username back.
+
+### What the agent can do
+
+| Tool | Purpose |
+|---|---|
+| `telegram_send_message` | Text, plain or formatted; 4096-char limit enforced with a clear error |
+| `telegram_send_photo` | Local path or URL, up to 10 MB |
+| `telegram_send_file` | Any document up to 50 MB — logs, diffs, PDFs, zips |
+| `telegram_get_updates` | Read replies; only unseen messages by default |
+| `telegram_send_reaction` | 👀 / ✅ / ❌ on a message |
+| `telegram_download_file` | Pull a file the user sent, up to 20 MB |
+| `telegram_health` | Verify the token before doing anything else |
+
+The server retries 429/5xx with backoff, retries once without `parse_mode` when
+Telegram rejects the markup, redacts the token from every error it returns,
+and refuses to start silently without a token — it exposes a single
+`telegram_status` tool that explains the setup instead.
+
+## Quick start — bot daemon (Command Code only)
+
+```bash
 git clone https://github.com/qrak/telegram-commandcode.git
 cd telegram-commandcode
-pip install -e "."
-
-# Or with voice transcription support
-pip install -e ".[voice]"
+python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -e .
 ```
 
-### Requirements
-
-- Python 3.11+
-- `python-telegram-bot[job-queue]>=20.8`
-- Command Code CLI (`cmd`) installed and on PATH
-- (Optional) `openai` for voice transcription
-
-## Setup
-
 ```bash
-# 1. Get bot token from @BotFather
-# 2. Set environment variables
 export TELEGRAM_BOT_TOKEN="123456:ABC..."
-export TELEGRAM_ALLOWED_USERS="any"  # or comma-separated user IDs
-
-# 3. Start the bot
+export TELEGRAM_ALLOWED_USERS="<your numeric user id>"
+export COMMAND_CODE_WORKDIR="$HOME/projects/my-app"
 telegram-commandcode
-# or: python -m telegram_commandcode.bot
 ```
 
-### Env Vars
+Then message the bot: a plain message becomes a prompt for `cmd`, and slash
+commands map to the CLI — `/model`, `/plan`, `/review`, `/status`, `/stop` and
+43 more. Type `/` in Telegram to see the menu.
 
-| Variable | Default | Description |
+### Configuration
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | *(required)* | Bot token from @BotFather |
-| `TELEGRAM_ALLOWED_USERS` | `any` | Comma-separated user IDs |
-| `COMMAND_CODE_CMD` | `cmd` | Path to Command Code binary |
-| `COMMAND_CODE_YOLO` | `true` | `false` → read-only mode |
-| `COMMAND_CODE_MAX_TURNS` | `20` | Max conversation turns per prompt |
-| `OPENAI_API_KEY` | *(optional)* | For voice message transcription |
+| `TELEGRAM_BOT_TOKEN` | — | **Required.** From @BotFather |
+| `TELEGRAM_ALLOWED_USERS` | *(empty = locked)* | Comma-separated numeric ids, or `any` to opt in to open access |
+| `COMMAND_CODE_CMD` | `cmd` | Path to the Command Code binary |
+| `COMMAND_CODE_WORKDIR` | current directory | Where the agent runs |
+| `COMMAND_CODE_YOLO` | `true` | `false` runs the agent without `--yolo` |
+| `COMMAND_CODE_MAX_TURNS` | `20` | Max turns per prompt |
+| `OPENAI_API_KEY` | — | Optional, enables voice transcription |
 
-### systemd Service (persistent)
+An empty allow-list is **fail-closed**: the bot replies with your numeric id
+and instructions instead of executing anything. `TELEGRAM_ALLOWED_USERS=any`
+is an explicit opt-in, not the default.
 
-```ini
-# ~/.config/systemd/user/telegram-commandcode.service
-[Unit]
-Description=Telegram Command Code Bot
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/home/user/.local/bin/telegram-commandcode
-Environment="TELEGRAM_BOT_TOKEN=your_token"
-Environment="COMMAND_CODE_YOLO=true"
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
+### Run it as a service
 
 ```bash
+cp deploy/telegram-commandcode.service ~/.config/systemd/user/
+# edit ExecStart / EnvironmentFile / WorkingDirectory first
 systemctl --user daemon-reload
 systemctl --user enable --now telegram-commandcode.service
 ```
 
-## Features
+## Security
 
-| Feature | Description |
-|---|---|
-| 👀 **Reactions** | 👀 while processing, ✅ on success, ❌ on error |
-| 📷 **Photo reception** | Photos downloaded and passed to `cmd` |
-| 📄 **File reception** | Documents sent to `/tmp/telegram-cmd/` |
-| 🎤 **Voice transcription** | OpenAI Whisper (requires `OPENAI_API_KEY`) |
-| 📎 **Auto-send files** | `MEDIA:/path` in output → auto-attached |
-| 👥 **Group chat** | Responds when @mentioned or replied to |
-| ✏️ **Single-message editing** | Status message edited in-place — no chat clutter |
-| 🔄 **Session chaining** | `/resume` reads CC session history |
-| 🎯 **Goal tracking** | `/goal <text>` sets standing objective |
-| 🧭 **Mid-session steering** | `/steer <text>` guides all subsequent prompts |
-| 📋 **Prompt queueing** | `/queue <prompt>` queues for next turn |
-| 🔄 **Background tasks** | `/background <prompt>` runs detached |
-| ⚙️ **Config persistence** | Model/provider/effort persist to `~/.commandcode/config.json` |
+This tool gives a chat app the ability to drive an agent that edits files and
+runs shell commands. Read [SECURITY.md](SECURITY.md) before exposing it:
 
-## Slash Commands
+- set `TELEGRAM_ALLOWED_USERS` to your own id,
+- run it in a project directory, not your home directory,
+- treat the bot token like an SSH key,
+- on a shared host, run the bot in a container under a dedicated user.
 
-All 46+ commands from the Node.js version are implemented. Type `/` in Telegram to see the menu.
+`COMMAND_CODE_YOLO=true` is the intended mode — and it is remote code execution
+by design. Do not put production credentials on the host.
 
-**CLI-mapped**: `/feedback`, `/learntaste`, `/login`, `/logout`, `/mcp`, `/skills`, `/taste`, `/info`, `/version`, `/update`
+## Requirements
 
-**Config & session**: `/status`, `/model`, `/effort`, `/provider`, `/add-dir`, `/goal`, `/steer`, `/plan`, `/compact-mode`, `/configure-models`, `/context`
+- **MCP server:** Node.js ≥ 18, a Telegram bot token.
+- **Bot daemon:** Python ≥ 3.11, `python-telegram-bot` 20–21, the Command Code
+  CLI on `PATH`. Command Code is closed-source and requires its own
+  subscription; the bot daemon is only useful if you already use it.
 
-**Session control**: `/resume`, `/clear`, `/new`, `/fork`, `/rename`, `/undo`, `/retry`, `/queue`, `/background`, `/stop`, `/reload`
-
-**Prompt-based**: `/review`, `/init`, `/memory`, `/pr-comments`, `/agents`, `/cmd`
-
-## MCP Server (unchanged)
-
-The Node.js MCP server (`index.js`) remains for Command Code → Telegram direction:
+## Development
 
 ```bash
-cmd mcp add telegram \
-  -e TELEGRAM_BOT_TOKEN=*** \
-  -e TELEGRAM_DEFAULT_CHAT_ID=1141080547 \
-  -- npx github:qrak/telegram-commandcode
+npm install
+npm test                       # MCP protocol tests (spawns the real server)
+
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev]"
+pytest                         # 36 unit tests, no network, no `cmd` needed
 ```
+
+CI runs both suites on Linux and Windows.
+
+## Repository layout
+
+```
+index.js                     MCP server (the agent-facing part)
+package.json                 npm metadata, tests, bin
+telegram_commandcode/        Python bot daemon
+  gateway/                   router, sender, processor, media
+  commands/                  slash-command handlers (47)
+  executor.py                async `cmd` subprocess runner
+  formatter.py, chunking.py  MarkdownV2 escaping and 4096-char splitting
+skill/                       publishable SKILL.md + references for agent
+                             marketplaces (Agensi, Claude Code skills)
+tests/                       pytest suite
+test/                        MCP protocol tests (node:test)
+legacy/                      original Node bot, archived and unsupported
+deploy/                      systemd unit
+```
+
+## Publishing as an agent skill
+
+`skill/` is a self-contained SKILL.md package: the playbook for when and how an
+agent should use these tools, including MarkdownV2 pitfalls, limits, approval
+loops and troubleshooting. Build the upload zip with:
+
+```bash
+node scripts/build-skill.mjs     # writes dist/telegram-bridge-skill.zip
+```
+
+The skill depends on this repository (MIT) but is not a copy of it: it encodes
+the operating knowledge, while the MCP server stays free here.
+
+## Status and known limits
+
+- The MCP server is tested against `@modelcontextprotocol/sdk` 1.29 and Node 18/20/22.
+- The bot daemon calls the `cmd` CLI with `-p <prompt>` and Command Code flags;
+  it is coupled to that CLI's argument surface by definition.
+- Command Code is not open source, so the daemon cannot be tested end-to-end in
+  CI. Everything that does not need the binary is unit-tested.
+- `telegram_get_updates` acknowledges updates: do not run the bot daemon and the
+  MCP server against the same token at the same time, or they will steal each
+  other's messages.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
