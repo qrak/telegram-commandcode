@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "telegram-commandcode"
-version = "2.1.1"
+version = "2.2.0"
 description = "Async Python Telegram bot bridging Telegram ↔ Command Code CLI — Hermes Agent architecture patterns"
 authors = [{ name = "qrak" }]
 license = { text = "MIT" }

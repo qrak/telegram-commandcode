@@ -3,21 +3,20 @@ Telegram MarkdownV2 / HTML formatting utilities.
 
 Handles:
 - Safe escaping of Telegram-special characters for MarkdownV2
-- Auto-fallback to plain text on parse errors
-- Code block wrapping
-- Link formatting
-- Hermes-style format_message: full markdown → MarkdownV2 pipeline
-  (GFM tables → bullet groups, headers→bold, bold/italic/strikethrough conversion,
-   placeholders for protected regions, safety-net escaping)
+- Escaping inside code blocks vs. ordinary text
+- Stripping MarkdownV2 back to plain text for parse-failure fallbacks
+- Hermes-style ``format_message``: full markdown → MarkdownV2 pipeline
+  (GFM tables → bullet groups, headers → bold, bold/italic/strikethrough
+  conversion, placeholders for protected regions, safety-net escaping)
+
+``format_message`` is what turns the model's markdown answer into something
+Telegram renders, so headings, code fences and tables stop showing up as
+literal asterisks and pipes.
 """
 
 from __future__ import annotations
 
 import re
-import logging
-from typing import Optional
-
-logger = logging.getLogger(__name__)
 
 # Characters that MUST be escaped in Telegram MarkdownV2:
 #   _ * [ ] ( ) ~ ` > # + - = | { } . !
@@ -42,10 +41,9 @@ def escape_md2(text: str) -> str:
 def strip_mdv2(text: str) -> str:
     """Strip MarkdownV2 escapes to produce clean plain text.
 
-    Ported from Hermes Agent ``_strip_mdv2()``.
-    Removes escape backslashes before special characters and strips MarkdownV2
-    formatting markers (bold, italic, strikethrough, spoiler) so the fallback
-    plain-text path doesn't show stray syntax characters.
+    Used when Telegram rejects a message as unparsable: resending the escaped
+    text with ``parse_mode=None`` would show stray backslashes, so the escapes
+    and formatting markers are removed first.
     """
     # Remove escape backslashes before special characters
     cleaned = re.sub(r'\\([_*\[\]()~`>#\+\-=|{}.!\\])', r'\1', text)
@@ -65,93 +63,8 @@ def escape_code_block(text: str) -> str:
     return _CODE_BLOCK_SPECIAL.sub(r"\\\1", text)
 
 
-def wrap_code(text: str, language: str = "") -> str:
-    """
-    Wrap text in a Telegram-compatible code block.
-    Handles escaping of backticks within the content.
-    """
-    escaped = escape_code_block(text)
-    return f"```{language}\n{escaped}\n```"
-
-
-def wrap_inline_code(text: str) -> str:
-    """Wrap text in inline code markers: `text`."""
-    escaped = escape_code_block(text)
-    return f"`{escaped}`"
-
-
-def bold(text: str) -> str:
-    return f"*{escape_md2(text)}*"
-
-
-def italic(text: str) -> str:
-    return f"_{escape_md2(text)}_"
-
-
-def link(text: str, url: str) -> str:
-    """Format a MarkdownV2 link: [text](url). Both are escaped appropriately."""
-    # URL characters that break MarkdownV2 links: )
-    url_escaped = url.replace(")", "\\)")
-    return f"[{escape_md2(text)}]({url_escaped})"
-
-
-def escape_user_input(text: str) -> str:
-    """
-    Escape user-provided text for safe inclusion in message templates.
-    More aggressive than escape_md2 — also handles newlines in awkward places.
-    """
-    # Escape all special characters
-    escaped = escape_md2(text)
-    # Escape stray newlines that could break a MarkdownV2 parse
-    # (MarkdownV2 requires double-newline for paragraph breaks)
-    return escaped
-
-
-def safe_send_params(
-    text: str,
-    parse_mode: str = "MarkdownV2",
-    *,
-    disable_web_page_preview: bool = True,
-) -> dict:
-    """
-    Return kwargs for PTB's send_message / edit_message_text.
-
-    Usage:
-        await msg.edit_text(text, **safe_send_params(text))
-    """
-    return {
-        "parse_mode": parse_mode,
-        "link_preview_options": {"is_disabled": disable_web_page_preview},
-    }
-
-
-def try_parse_fallback(text: str) -> tuple[str, Optional[str]]:
-    """Attempt to determine if text is safe for MarkdownV2.
-    Returns (text, 'MarkdownV2') if likely safe, (text, None) for plain text.
-
-    This is a heuristic — the real validation happens when Telegram returns
-    "can't parse entities", at which point the caller should retry with
-    parse_mode=None.
-    """
-    # Quick heuristic: if text has unescaped special chars in suspicious
-    # patterns (e.g., orphan underscores in the middle of words, unmatched
-    # brackets), fall back to plain text.
-    #
-    # Since we escape ALL special characters in escape_md2(), the heuristic
-    # is only needed for user-provided raw text or externally-generated
-    # markdown that might be malformed.
-
-    # Count unescaped underscores (underscores NOT preceded by backslash)
-    unescaped_underscores = len(re.findall(r"(?<!\\)_", text))
-    if unescaped_underscores % 2 != 0:
-        # Odd number of underscores = likely unclosed italic/bold
-        return text, None
-
-    return text, "MarkdownV2"
-
-
 # ═══════════════════════════════════════════════════════════════════════════
-# Hermes-style format_message — full markdown → MarkdownV2 conversion pipeline
+# format_message — full markdown → MarkdownV2 conversion pipeline
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Matches GFM table delimiter rows
@@ -179,7 +92,6 @@ def _split_table_row(line: str) -> list[str]:
 def _render_table_block_for_telegram(table_block: list[str]) -> str:
     """Render a detected GFM table as Telegram-friendly row groups.
 
-    Ported from Hermes Agent ``_render_table_block_for_telegram()``.
     Telegram's MarkdownV2 has no table syntax — pipe characters render as
     backslash-pipe text. Converting each row into a bold heading plus bullet
     list keeps tables readable on mobile clients.
@@ -224,7 +136,6 @@ def _render_table_block_for_telegram(table_block: list[str]) -> str:
 def _wrap_markdown_tables(text: str) -> str:
     """Rewrite GFM-style pipe tables into Telegram-friendly bullet groups.
 
-    Ported from Hermes Agent ``_wrap_markdown_tables()``.
     Tables inside existing fenced code blocks are left alone.
     """
     if '|' not in text or '-' not in text:
@@ -267,8 +178,6 @@ def _wrap_markdown_tables(text: str) -> str:
 
 def format_message(content: str) -> str:
     """Convert standard markdown to Telegram MarkdownV2 format.
-
-    Ported from Hermes Agent ``TelegramAdapter.format_message()``.
 
     Protected regions (code blocks, inline code) are extracted first so
     their contents are never modified.  Standard markdown constructs

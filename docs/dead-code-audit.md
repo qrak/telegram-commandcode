@@ -10,6 +10,32 @@ Tools used:
 | JavaScript | [ESLint](https://eslint.org) 8 (`no-unused-vars`, `no-unreachable`) | see below | clean |
 | JavaScript | [knip](https://knip.dev) 5 | `npm run deadcode` | clean (legacy/ ignored) |
 
+> **Status: resolved in 2.2.0.** §1 is gone (`vulture` exits 0), and every
+> behaviour described in §3 was rebuilt on flags that actually exist in the
+> CLI reference — `--resume`, `--fork-session`, `-n`, `--effort`,
+> `--config compact-mode=…`, `--output-format json` — instead of resetting
+> state and calling it a feature. `format_message()` and the GFM table helpers
+> were not deleted: they were wired into the result path, so model markdown now
+> renders. The audit below is kept as the record of what was wrong and why.
+
+Mapping from the audit to 2.2.0:
+
+| Audit item | Resolution |
+|---|---|
+| `/compact` reset state | One read-only summarisation run builds a handoff brief; the next prompt starts a new session seeded with it (injected once) |
+| `/compact-mode` inert | Passed per run as `--config compact-mode=<default\|fast>`; documented values only (`aggressive`/`gentle` were invented) |
+| `/undo N` ignored N | Drops the last N prompts and seeds a brief describing the state *before* them |
+| `/fork` reset + name | `--continue --fork-session -n <name>` on the next prompt; original transcript untouched |
+| `/rename` cosmetic | `-n <name>` on every later run; `/resume <name>` finds it |
+| `/background` untracked, racing | Separate process slot, isolated session (no `--continue`), `/stop` cancels it and reports the count |
+| interactive CLI forwarders | `/login` explains host-side auth and shows `cmd status --json`; `/feedback <text>` passes the text; `/update check` runs `--check-only`; a timeout now says "needs a terminal" |
+| `/provider`, `/effort` write-only | `/effort` → `--effort`; `/provider` validated against the four documented auth providers |
+| `/usage`, `/context` static | Real token counts and duration from the JSON result, plus per-chat totals |
+| `format_message` dead | Wired into the result path (headings, fences, tables render) |
+| `register_bg`/`_bg_processes` dead | Now the background half of `RunningProcessTracker` |
+| `human_reason` test-only | Shown in the failure header and used for exit-code reporting |
+| `all_sessions` dead | Deleted; `/resume list` shows this chat's name and id instead |
+
 Reproduce:
 
 ```bash
@@ -77,13 +103,17 @@ Ordered by how likely they are to disappoint a user.
 
 ### Features built but never connected
 
-- **Telegram table rendering** (`format_message`) — implemented, tested by
-  nobody, called by nobody.
-- **Streaming subprocess output** (`run_cmd_streaming`) — implemented; the bot
-  uses batched progress edits instead.
-- **Background process tracking** (`register_bg`) — data structure and kill
-  loop exist; nothing registers.
-- **Session listing** (`all_sessions`) — no `/sessions` command exists.
+Resolved: the first two are wired, the last two are gone.
+
+- **Telegram table rendering** (`format_message`) — now renders every model
+  answer; headings, fenced code and GFM tables stop showing as literal markup.
+- **Background process tracking** (`register_bg`) — now the background half of
+  `RunningProcessTracker`, so `/stop` reaches background runs.
+- **Streaming subprocess output** (`run_cmd_streaming`) — deleted. It was
+  superseded by the single `_run()` reader that feeds progress *and* parses the
+  JSON result.
+- **Session listing** (`all_sessions`) — deleted; `/resume list` reports this
+  chat's current name and id, which is what a Telegram user can act on.
 
 ## 4. JavaScript / MCP server
 
@@ -96,22 +126,20 @@ The only structural note: `index.js` is a single 570-line module. It is not
 dead code, but extracting the Telegram API client and the tool handlers would
 make it unit-testable without spawning a process.
 
-## 5. Recommended order of work
+## 5. What 2.2.0 did
 
-1. **Make the menu honest** (1 hour): change `/compact` and `/undo` descriptions
-   to what they do, or remove `/compact-mode` from `BOT_COMMANDS` until it is
-   wired. Misleading commands cost more trust than missing ones.
-2. **Delete the confirmed dead code** (30 min): `format_message` + its four
-   helpers, `run_cmd_streaming`, the formatter helpers, `all_sessions`,
-   `classify_error`, `register_bg`/`unregister_bg` + `_bg_processes`,
-   `should_send_as_file`. Keep `human_reason` (tested) or drop both.
-3. **Wire or remove `/compact-mode`** (unknown): needs a real Command Code flag;
-   if none exists, remove it.
-4. **Decide on `/background`** (1–2 hours): either register it in a separate
-   tracker (so `/stop` can target it) or state in the message that it is
-   fire-and-forget.
-5. **Verify `/provider` and `/effort`** against a real Command Code install —
-   this is the only item that cannot be settled by reading the code.
-6. **Add the gates to CI** (optional): `python -m vulture` and
-   `npm run deadcode`. Vulture exits non-zero while the dead code above exists,
-   so either clean first or run it non-blocking.
+1. **Menu made honest** — every command now does what its description says,
+   and `/session-file` was added so the captured session id is discoverable.
+2. **Dead code deleted** — `run_cmd_streaming`, the formatter helpers,
+   `all_sessions`, `classify_error`, `wrap_code`, `should_send_as_file` and the
+   duplicate effort-level tuple. `format_message`, `register_bg` and
+   `human_reason` were wired instead of deleted. `vulture` now exits 0, so CI
+   gates on it.
+3. **`/compact-mode` wired** — `--config compact-mode=<default|fast>`, with the
+   two documented values only (`aggressive`/`gentle` did not exist).
+4. **`/background` tracked** — separate process slot, isolated session, killed
+   by `/stop`.
+5. **`/provider` and `/effort`** — `/effort` now passes `--effort`; `/provider`
+   validates against the four documented auth providers and explains that the
+   host may need `cmd login`.
+6. **CI gates** — `python -m vulture` and `npm run deadcode` run on every push.

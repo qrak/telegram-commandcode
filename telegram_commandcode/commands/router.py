@@ -40,6 +40,8 @@ TG_TO_CC: dict[str, str] = {
     "learntaste": "/learn-taste",
     "pr_comments": "/pr-comments",
     "prcomments": "/pr-comments",
+    "session_file": "/session-file",
+    "sessionfile": "/session-file",
     "terminal_setup": "/terminal-setup",
     "terminalsetup": "/terminal-setup",
 }
@@ -49,9 +51,6 @@ TUI_ONLY: set[str] = {"/ide", "/terminal-setup", "/rewind"}
 
 # N/A remotely commands
 NA_CMDS: set[str] = {"/exit", "/share", "/unshare"}
-
-# Valid effort levels
-VALID_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 class CommandRouter:

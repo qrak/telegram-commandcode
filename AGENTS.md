@@ -18,12 +18,12 @@ package.json                  npm metadata, bin, npm test
 scripts/build-skill.mjs       builds dist/telegram-bridge-skill.zip
 skill/                        publishable SKILL.md + 4 reference docs
 test/mcp.test.mjs             node:test protocol tests (spawns the server)
-tests/                        pytest suite (97 tests, no network, no `cmd`)
+tests/                        pytest suite (163 tests, no network, no `cmd`)
 legacy/                       old Node bot + Discord bridge (archived)
 deploy/                       systemd unit
 
 telegram_commandcode/
-├── bot.py                    PTB Application, 47-command menu, startup
+├── bot.py                    PTB Application, 48-command menu, startup
 ├── session.py                ChatSession dataclass + file-backed SessionStore
 ├── executor.py               async `cmd` runner, per-chat process tracker
 ├── chunking.py               code-fence-aware 4096-char splitter
@@ -35,7 +35,7 @@ telegram_commandcode/
 │   ├── processor.py          enqueue → per-chat lock → streaming pipeline
 │   └── media.py              download, transcribe, auto-attach MEDIA: paths
 └── commands/
-    ├── router.py             dispatch table (47 entries, TG→CC name map)
+    ├── router.py             dispatch table (48 entries, TG→CC name map)
     ├── base.py               shared send_md/run_cli/config/state helpers
     ├── info_cmds.py          12 commands
     ├── session_cmds.py        9 commands
@@ -69,7 +69,7 @@ telegram_commandcode/
 ```bash
 npm test                                  # 6 protocol tests, ~4 s
 python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]" && pytest         # 97 tests, ~2 s
+pip install -e ".[dev]" && pytest         # 163 tests, ~2 s
 node scripts/build-skill.mjs              # validates SKILL.md frontmatter
 
 python -m vulture                         # dead Python code (config in pyproject)

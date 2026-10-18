@@ -64,10 +64,10 @@ async def test_cli_output_inside_code_block_is_not_double_escaped():
     chat = FakeChat()
     handler = BaseCommandHandler()
 
-    async def fake_run_cli(args, timeout=30):
-        return "model.v2 (default)"
+    async def fake_run_cli_result(args, timeout=30):
+        return "model.v2 (default)", False
 
-    handler.run_cli = fake_run_cli
+    handler.run_cli_result = fake_run_cli_result
     await handler.run_cli_and_reply(FakeUpdate(chat), ["--version"])
 
     sent, _ = chat.messages[0]

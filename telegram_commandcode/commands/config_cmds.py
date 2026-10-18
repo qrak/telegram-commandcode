@@ -2,11 +2,19 @@
 ConfigCommands — model selection, provider switching, effort levels,
 configure-models, compact-mode display/toggle.
 
-All Lane A — local state reads/writes, zero LLM involvement.
+All Lane A — local state reads/writes, zero LLM involvement. The settings
+written here are also passed to every run as CLI flags, so a change takes
+effect on the next prompt without restarting anything:
+
+    /model <id>          → -m <id>
+    /effort <level>      → --effort <level>
+    /compact-mode <m>    → --config compact-mode=<m>
+    /provider <name>     → provider key in ~/.commandcode/config.json
 """
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Optional
 
 from telegram import Update
@@ -18,7 +26,16 @@ from .base import BaseCommandHandler
 if TYPE_CHECKING:
     pass
 
+logger = logging.getLogger(__name__)
+
+# Levels documented for /effort and --effort (the model decides which apply).
 VALID_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+# config.json "provider": the selected auth provider.
+VALID_PROVIDERS = ("command-code", "anthropic", "github-copilot", "codex")
+
+# config.json "compactMode" / --config compact-mode: auto-compaction strategy.
+VALID_COMPACT_MODES = ("default", "fast")
 
 
 class ConfigCommands(BaseCommandHandler):
@@ -46,17 +63,24 @@ class ConfigCommands(BaseCommandHandler):
         if args:
             # Switch model
             self.update_state(chat_id, model=args)
-            # Persist to CC config
+            # Persist to CC config so TUI sessions agree
             try:
                 cfg = self.read_cc_config()
                 cfg["model"] = args
                 self.write_cc_config(cfg)
             except Exception:
-                pass
+                logger.warning("Could not persist model to CC config")
+
+            extra = ""
+            if state.effort:
+                extra = (
+                    f"\n\n_Reasoning effort `{escape_md2(state.effort)}` stays "
+                    "set and is passed to the new model\\._"
+                )
             await self.send_md(
                 update,
                 f"✅ Switched to model: *{escape_md2(args)}*\n\n"
-                f"Next prompts will use `\\-m {escape_md2(args)}`\\.",
+                f"Next prompts will use `\\-m {escape_md2(args)}`\\.{extra}",
             )
             return None
 
@@ -107,17 +131,33 @@ class ConfigCommands(BaseCommandHandler):
         if not args:
             await self.send_md(
                 update,
-                f"🔌 Current provider: *{escape_md2(current)}*\n\n"
+                f"🔌 Current auth provider: *{escape_md2(current)}*\n\n"
+                f"Available: {', '.join(f'`{p}`' for p in VALID_PROVIDERS)}\n\n"
                 "Use `/provider <name>` to switch\\.\n"
-                "_\\(Note: only locally installed providers are available\\.\\)_",
+                "_The provider is read when a new Command Code process starts, "
+                "so the next prompt picks it up\\. Switching to anthropic or "
+                "codex may need `cmd login` on the host first\\._",
             )
             return None
 
-        cfg["provider"] = args
+        provider = args.strip().lower()
+        if provider not in VALID_PROVIDERS:
+            await self.send_md(
+                update,
+                f"❌ Unknown provider `{escape_md2(provider)}`\\.\n"
+                f"Valid: {', '.join(f'`{p}`' for p in VALID_PROVIDERS)}",
+            )
+            return None
+
+        cfg["provider"] = provider
         self.write_cc_config(cfg)
         await self.send_md(
             update,
-            f"✅ Provider switched to *{escape_md2(args)}*\\.",
+            f"✅ Provider set to *{escape_md2(provider)}* in "
+            "`~/\\.commandcode/config\\.json`\\.\n\n"
+            "The next prompt starts a new Command Code process with it\\. "
+            "If that provider is not authenticated yet, run `cmd login` on the "
+            "host \\(or `/status` here to check\\)\\.",
         )
         return None
 
@@ -126,41 +166,57 @@ class ConfigCommands(BaseCommandHandler):
     async def handle_effort(
         self, update: Update, context, args: str,
     ) -> Optional[str]:
+        chat_id = str(update.effective_chat.id)
+        state = self.get_state(chat_id)
         cfg = self.read_cc_config()
-        current_model = cfg.get("model", "default")
-        current_effort = (cfg.get("reasoningEffort", {}) or {}).get(current_model)
+        configured = (cfg.get("reasoningEffort") or {}).get(
+            cfg.get("model", "default")
+        )
+        current = state.effort or configured
 
         if not args:
-            if current_effort:
+            model = state.model or cfg.get("model", "default")
+            if current:
                 await self.send_md(
                     update,
-                    f"🧠 Current effort for `{escape_md2(current_model)}`: *{escape_md2(current_effort)}*\n\n"
-                    f"Valid levels: {', '.join(f'`{lv}`' for lv in VALID_EFFORT_LEVELS)}\n\n"
+                    f"🧠 Reasoning effort for `{escape_md2(model)}`: "
+                    f"*{escape_md2(current)}*\n\n"
+                    f"Levels: {', '.join(f'`{lv}`' for lv in VALID_EFFORT_LEVELS)}\n\n"
                     f"Use `/effort <level>` to change it\\.",
                 )
             else:
                 await self.send_md(
                     update,
-                    f"🧠 No effort set for `{escape_md2(current_model)}` (uses model default)\\.\n\n"
-                    f"Valid levels: {', '.join(f'`{lv}`' for lv in VALID_EFFORT_LEVELS)}\n\n"
+                    f"🧠 No effort set for `{escape_md2(model)}` \\(model default\\)\\.\n\n"
+                    f"Levels: {', '.join(f'`{lv}`' for lv in VALID_EFFORT_LEVELS)}\n\n"
                     f"Use `/effort <level>` to set it\\.",
                 )
             return None
 
-        level = args.lower()
+        level = args.strip().lower()
         if level not in VALID_EFFORT_LEVELS:
             await self.send_md(
                 update,
-                f"❌ Invalid effort level\\. Valid: {', '.join(f'`{lv}`' for lv in VALID_EFFORT_LEVELS)}",
+                f"❌ Invalid effort level\\. Valid: "
+                f"{', '.join(f'`{lv}`' for lv in VALID_EFFORT_LEVELS)}",
             )
             return None
 
-        cfg.setdefault("reasoningEffort", {})
-        cfg["reasoningEffort"][current_model] = level
-        self.write_cc_config(cfg)
+        # Passed per run as --effort, and persisted for TUI sessions too.
+        self.update_state(chat_id, effort=level)
+        try:
+            model_key = state.model or cfg.get("model", "default")
+            cfg.setdefault("reasoningEffort", {})
+            cfg["reasoningEffort"][model_key] = level
+            self.write_cc_config(cfg)
+        except Exception:
+            logger.warning("Could not persist reasoning effort to CC config")
+
         await self.send_md(
             update,
-            f"✅ Effort set to *{escape_md2(level)}* for `{escape_md2(current_model)}`\\.",
+            f"✅ Reasoning effort *{escape_md2(level)}*\\.\n\n"
+            "Next prompts will pass `\\-\\-effort "
+            f"{escape_md2(level)}` to Command Code\\.",
         )
         return None
 
@@ -173,19 +229,21 @@ class ConfigCommands(BaseCommandHandler):
         if chat:
             await chat.send_chat_action(action="typing")
 
+        chat_id = str(update.effective_chat.id)
+        state = self.get_state(chat_id)
         cfg = self.read_cc_config()
-        current_model = cfg.get("model", "default")
+        current_model = state.model or cfg.get("model", "default")
         current_provider = cfg.get("provider", "command-code")
 
-        per_task = cfg.get("modelOverrides", cfg.get("permissions", {}))
-        if isinstance(per_task, dict) and per_task:
-            task_lines = "\n".join(
+        effort_map = cfg.get("reasoningEffort") or {}
+        if isinstance(effort_map, dict) and effort_map:
+            effort_lines = "\n".join(
                 f"  • `{escape_md2(str(k))}` → `{escape_md2(str(v))}`"
-                for k, v in list(per_task.items())[:10]
+                for k, v in list(effort_map.items())[:10]
             )
-            task_section = f"\n*Per\\-task model overrides:*\n{task_lines}\n"
+            effort_section = f"\n*Reasoning effort:*\n{effort_lines}\n"
         else:
-            task_section = "\n_No per\\-task overrides configured\\._\n"
+            effort_section = "\n_No reasoning effort configured\\._\n"
 
         try:
             models_out = await self.run_cli(["--list-models"], timeout=15)
@@ -195,12 +253,15 @@ class ConfigCommands(BaseCommandHandler):
         msg = (
             f"⚙️ *Model Configuration*\n\n"
             f"• Provider: `{escape_md2(current_provider)}`\n"
-            f"• Default model: `{escape_md2(current_model)}`\n"
-            f"{task_section}\n"
+            f"• Model: `{escape_md2(current_model)}`\n"
+            f"• Effort: `{escape_md2(state.effort or 'model default')}`\n"
+            f"• Compact mode: `{escape_md2(state.compact_mode or 'default')}`\n"
+            f"{effort_section}\n"
             f"*Available models:*\n```\n{escape_code_block(models_out[:800])}\n```\n"
-            f"\\- Use `/model <name>` to switch the default model\n"
-            f"\\- Use `/provider <name>` to switch provider\n"
-            f"\\- Set per\\-task overrides via CC config or the TUI\n"
+            f"\\- Use `/model <name>` to switch the model\n"
+            f"\\- Use `/provider <name>` to switch the auth provider\n"
+            f"\\- Use `/effort <level>` to set reasoning effort\n"
+            f"\\- Use `/compact\\-mode <default|fast>` for auto\\-compaction"
         )
         await self._send_chunked(update, msg)
         return None
@@ -212,30 +273,42 @@ class ConfigCommands(BaseCommandHandler):
     ) -> Optional[str]:
         chat_id = str(update.effective_chat.id)
         state = self.get_state(chat_id)
-        valid_modes = ("default", "aggressive", "gentle")
 
         if not args:
-            current = state.compact_mode or "default"
+            current = state.compact_mode or self.read_cc_config().get(
+                "compactMode", "default"
+            )
             await self.send_md(
                 update,
                 f"🗜️ *Compact mode:* `{escape_md2(current)}`\n\n"
-                f"Available modes: {', '.join(f'`{m}`' for m in valid_modes)}\n\n"
-                f"Use `/compact\\-mode <mode>` to change\\.",
+                f"Available: {', '.join(f'`{m}`' for m in VALID_COMPACT_MODES)}\n\n"
+                "• `default` — nothing until 90% of the window, then summarize\n"
+                "• `fast` — also trims old tool output at 50% and 80%\n\n"
+                f"Use `/compact\\-mode <mode>` to change it\\.",
             )
             return None
 
-        mode = args.lower()
-        if mode not in valid_modes:
+        mode = args.strip().lower()
+        if mode not in VALID_COMPACT_MODES:
             await self.send_md(
                 update,
-                f"❌ Invalid mode: `{escape_md2(mode)}`\\. "
-                f"Use: {', '.join(f'`{m}`' for m in valid_modes)}\\.",
+                f"❌ Invalid mode `{escape_md2(mode)}`\\. "
+                f"Use: {', '.join(f'`{m}`' for m in VALID_COMPACT_MODES)}",
             )
             return None
 
         self.update_state(chat_id, compact_mode=mode)
+        try:
+            cfg = self.read_cc_config()
+            cfg["compactMode"] = mode
+            self.write_cc_config(cfg)
+        except Exception:
+            logger.warning("Could not persist compact mode to CC config")
+
         await self.send_md(
             update,
-            f"🗜️ Compact mode set to *{escape_md2(mode)}*\\.",
+            f"🗜️ Compact mode set to *{escape_md2(mode)}*\\.\n\n"
+            f"Every run now passes `\\-\\-config compact\\-mode={escape_md2(mode)}`, "
+            "and the setting is saved for the TUI too\\.",
         )
         return None

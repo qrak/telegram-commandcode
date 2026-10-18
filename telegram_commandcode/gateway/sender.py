@@ -87,15 +87,6 @@ class MessageSender:
         except Exception:
             pass
 
-    @staticmethod
-    def classify_error(error: Exception) -> str:
-        """Classify a Telegram error for retry decisions.
-
-        Returns: 'parse', 'too_long', 'flood', 'network', 'connect',
-        'timeout', 'bad_request', 'unknown'.
-        """
-        return classify_telegram_error(error)
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Standalone functions (accessible without a Gateway instance for

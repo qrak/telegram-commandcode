@@ -14,13 +14,13 @@ import logging
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from telegram import Update
 
 from telegram_commandcode.session import ChatSession, session_store
 from telegram_commandcode.executor import DEFAULT_CMD_BIN
-from telegram_commandcode.formatter import escape_code_block
+from telegram_commandcode.formatter import escape_code_block, strip_mdv2
 from telegram_commandcode.chunking import (
     truncate_message,
     chunk_escaped,
@@ -110,8 +110,10 @@ class BaseCommandHandler:
                 )
             except Exception as exc:
                 if "can't parse entities" in str(exc).lower() and parse_mode:
+                    # Resending the escaped text would show the backslashes,
+                    # so send the unescaped (plain) version instead.
                     await chat.send_message(
-                        chunk,
+                        strip_mdv2(chunk),
                         link_preview_options={"is_disabled": True},
                     )
                 else:
@@ -119,8 +121,15 @@ class BaseCommandHandler:
 
     # ── CLI runner ──────────────────────────────────────────────────────
 
-    async def run_cli(self, args: list[str], timeout: int = 30) -> str:
-        """Run a Command Code CLI subcommand and return its output string."""
+    async def run_cli_result(
+        self, args: list[str], timeout: int = 30,
+    ) -> tuple[str, bool]:
+        """Run a Command Code subcommand and return ``(output, timed_out)``.
+
+        The flag matters to callers that can do better than "timed out":
+        several `cmd` subcommands (``login``, ``feedback``) expect a terminal
+        or a browser, and simply wait forever when driven from here.
+        """
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -133,7 +142,7 @@ class BaseCommandHandler:
             )
             out = stdout.decode("utf-8", errors="replace").strip()
             err = stderr.decode("utf-8", errors="replace").strip()
-            return out or err or f"(exit {proc.returncode})"
+            return out or err or f"(exit {proc.returncode})", False
         except asyncio.TimeoutError:
             # wait_for cancels the wait, not the child: kill it or it leaks.
             if proc is not None and proc.returncode is None:
@@ -141,29 +150,35 @@ class BaseCommandHandler:
                     proc.kill()
                 with suppress(ProcessLookupError):
                     await proc.wait()
-            return "⚠️ Command timed out."
+            return f"⚠️ Command timed out after {timeout}s.", True
         except FileNotFoundError:
-            return f"❌ Command '{DEFAULT_CMD_BIN}' not found."
+            return f"❌ Command '{DEFAULT_CMD_BIN}' not found.", False
         except Exception as exc:
-            return f"❌ {exc}"
+            return f"❌ {exc}", False
+
+    async def run_cli(self, args: list[str], timeout: int = 30) -> str:
+        """Run a Command Code CLI subcommand and return its output string."""
+        output, _ = await self.run_cli_result(args, timeout=timeout)
+        return output
 
     async def run_cli_and_reply(
         self, update: Update, args: list[str],
-        timeout: int = 30, wrap_code: bool = True,
+        timeout: int = 30, as_code_block: bool = True,
+        tty_hint: Optional[str] = None,
     ) -> None:
-        """Run a CLI command, send 'typing' indicator, and reply.
+        """Run a CLI command, send a 'typing' indicator, and reply.
 
-        This DRY pattern replaces 15+ repeated blocks of:
-            await chat.send_chat_action("typing")
-            output = await _run_cli(...)
-            capped = output[:3800] + ... if len(output) > 3800 else output
-            await _send_chunked(update, f"```\n{escape_code_block(capped)}\n```")
+        ``tty_hint`` replaces the raw timeout message for subcommands that
+        need an interactive terminal (login, feedback, ...).
         """
         chat = update.effective_chat
         if chat:
             await chat.send_chat_action(action="typing")
-        output = await self.run_cli(args, timeout=timeout)
-        if wrap_code:
+        output, timed_out = await self.run_cli_result(args, timeout=timeout)
+        if timed_out and tty_hint:
+            await self._send_chunked(update, tty_hint)
+            return
+        if as_code_block:
             capped = (
                 output[:3800] + "\n...(truncated)"
                 if len(output) > 3800

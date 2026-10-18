@@ -1,9 +1,10 @@
 """
 Persistent session state for telegram-commandcode.
 
-Each Telegram chat gets its own session with model selection, plan mode,
-steer/goal directives, queued prompts, and conversation state. Sessions
-persist across bot restarts via a JSON file at ~/.commandcode/telegram_sessions.json.
+Each Telegram chat gets its own session with model selection, reasoning effort,
+plan mode, steer/goal directives, queued prompts, session naming, and the
+Command Code session id it is currently talking to. Sessions persist across bot
+restarts via a JSON file at ~/.commandcode/telegram_sessions.json.
 """
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 SESSIONS_FILE = Path.home() / ".commandcode" / "telegram_sessions.json"
 
+# How many prompts to keep for /undo and for the status view.
+HISTORY_LIMIT = 50
+
 
 @dataclass
 class ChatSession:
@@ -27,6 +31,7 @@ class ChatSession:
     chat_id: str
     active: bool = False          # Whether a conversation is ongoing (--continue)
     model: Optional[str] = None   # Override model (passed as -m)
+    effort: Optional[str] = None  # Reasoning effort (passed as --effort)
     plan_mode: bool = False       # Plan mode toggle
     one_shot_plan: bool = False   # /plan <task> → one-shot, auto-disables after
     steer: Optional[str] = None   # Mid-session guidance prepended to prompts
@@ -34,9 +39,17 @@ class ChatSession:
     last_prompt: Optional[str] = None  # For /retry
     add_dirs: list[str] = field(default_factory=list)  # --add-dir paths
     queued_prompts: list[str] = field(default_factory=list)  # /queue items
-    session_name: Optional[str] = None  # /rename target
-    compact_mode: Optional[str] = None  # /compact-mode strategy (default, aggressive, gentle)
-    yolo: bool = True                     # /yolo toggle (--yolo flag)
+    session_name: Optional[str] = None   # -n / /rename
+    session_id: Optional[str] = None     # Command Code headless session id
+    resume_target: Optional[str] = None  # one-shot --resume <id|name>
+    fork_next: Optional[str] = None      # one-shot --fork-session, named
+    seed_context: Optional[str] = None   # injected once after /compact or /undo
+    compact_mode: Optional[str] = None   # default | fast (--config compact-mode)
+    yolo: bool = True                    # /yolo toggle (--yolo flag)
+    history: list[str] = field(default_factory=list)  # recent prompts, oldest first
+    last_usage: dict = field(default_factory=dict)    # token usage of the last run
+    total_usage: dict = field(default_factory=dict)   # summed usage for this chat
+    last_duration_ms: Optional[int] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -46,9 +59,11 @@ class ChatSession:
         # Filter out keys not in the dataclass (backward compat)
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in d.items() if k in valid_keys}
-        # Ensure add_dirs and queued_prompts are lists
         filtered.setdefault("add_dirs", [])
         filtered.setdefault("queued_prompts", [])
+        filtered.setdefault("history", [])
+        filtered.setdefault("last_usage", {})
+        filtered.setdefault("total_usage", {})
         return cls(**filtered)
 
 
@@ -123,12 +138,15 @@ class SessionStore:
             self._sessions.pop(chat_id, None)
             self._save()
 
-    @property
-    def all_sessions(self) -> dict[str, ChatSession]:
-        """Return a snapshot of all sessions (read-only)."""
-        self._ensure_loaded()
-        with self._lock:
-            return dict(self._sessions)
+    def remember(self, chat_id: str, prompt: str) -> ChatSession:
+        """Record a prompt as the last prompt and append it to the history."""
+        state = self.get(chat_id)
+        history = list(state.history) + [prompt]
+        return self.update(
+            chat_id,
+            last_prompt=prompt,
+            history=history[-HISTORY_LIMIT:],
+        )
 
 
 # Global singleton

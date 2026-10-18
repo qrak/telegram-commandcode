@@ -1,12 +1,19 @@
 """
 Async Command Code CLI executor.
 
-Runs `cmd -p "prompt"` via asyncio.subprocess with:
-- Non-blocking I/O (async stdout/stderr reading)
-- Interrupt support (SIGINT → SIGKILL escalation)
-- Timeout handling
-- Exit code → human-readable mapping
-- Streaming output via async generator
+Runs ``cmd -p "prompt"`` via asyncio.subprocess with:
+
+- Non-blocking line-by-line stdout reading (live progress)
+- ``--output-format json`` parsing: session id, token usage, final text
+- Interrupt support (SIGINT → SIGKILL escalation), foreground and background
+- Timeout handling that never leaks a child process
+- Exit code → human-readable mapping (including 8/9/10/130)
+
+The flags map 1:1 to the documented CLI reference:
+
+    -m/--model, --effort, --plan, -c/--continue, -r/--resume <id|name>,
+    --fork-session, -n/--name, --config key=value, --add-dir,
+    --max-turns, --yolo, --skip-onboarding, --trust, --output-format
 """
 
 from __future__ import annotations
@@ -17,11 +24,18 @@ import os
 import signal
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import Optional
+
+from telegram_commandcode.streamjson import (
+    parse_frame,
+    render_progress,
+    render_result,
+)
 
 logger = logging.getLogger(__name__)
 
-# Default values
+# ── Defaults ────────────────────────────────────────────────────────────────
+
 DEFAULT_CMD_BIN = os.getenv("COMMAND_CODE_CMD", "cmd")
 DEFAULT_TIMEOUT = 600  # 10 minutes
 
@@ -35,18 +49,34 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    """Parse a boolean env var ("false"/"0"/"no" turn it off)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
 DEFAULT_MAX_TURNS = _int_env("COMMAND_CODE_MAX_TURNS", 20)
-DEFAULT_YOLO = os.getenv("COMMAND_CODE_YOLO", "true").lower() != "false"
+DEFAULT_YOLO = _bool_env("COMMAND_CODE_YOLO", True)
+DEFAULT_TRUST = _bool_env("COMMAND_CODE_TRUST", True)
+# JSON output gives us session ids and token usage. Older CLI builds do not
+# understand --output-format; set COMMAND_CODE_JSON=0 for those.
+DEFAULT_JSON_OUTPUT = _bool_env("COMMAND_CODE_JSON", True)
 DEFAULT_WORKDIR = os.getenv("COMMAND_CODE_WORKDIR", "").strip()
 
+# Exit codes documented in https://commandcode.ai/docs/headless
 EXIT_CODE_REASONS: dict[int, str] = {
     0: "success",
     1: "general error",
-    3: "not authenticated",
-    4: "permission denied (use --yolo?)",
+    3: "not authenticated (run `cmd login` on the host)",
+    4: "permission denied (try /yolo)",
     5: "rate limited",
     6: "network failure",
     7: "server error (5xx)",
+    8: "max turns reached",
+    9: "model returned no response",
+    10: "insufficient credits",
     130: "interrupted",
 }
 
@@ -54,22 +84,40 @@ EXIT_CODE_REASONS: dict[int, str] = {
 @dataclass
 class CmdResult:
     """Result of a Command Code CLI invocation."""
+
     stdout: str
     stderr: str
     exit_code: int
     killed_by_signal: Optional[str] = None
     success: bool = False
 
+    # Populated from `--output-format json`
+    final_text: str = ""
+    session_id: Optional[str] = None
+    usage: dict = field(default_factory=dict)
+    duration_ms: Optional[int] = None
+    stop_reason: Optional[str] = None
+    subtype: Optional[str] = None
+
     @property
     def output(self) -> str:
-        """Combined stdout, falling back to stderr."""
-        return self.stdout.strip() or self.stderr.strip()
+        """Model answer, falling back to raw stdout, then stderr."""
+        return (
+            (self.final_text or "").strip()
+            or self.stdout.strip()
+            or self.stderr.strip()
+        )
 
     @property
     def is_error(self) -> bool:
         """True if the result looks like an error/warning."""
         out = self.output
-        return self.exit_code != 0 or out.startswith("⚠️") or out.startswith("❌")
+        return (
+            self.exit_code != 0
+            or self.subtype == "error"
+            or out.startswith("⚠️")
+            or out.startswith("❌")
+        )
 
     @property
     def human_reason(self) -> str:
@@ -80,20 +128,32 @@ class CmdResult:
 
 @dataclass
 class ExecOptions:
-    """Options passed to run_cmd()."""
+    """Options passed to run_cmd() / run_cmd_with_progress()."""
+
     model: Optional[str] = None       # -m <model>
+    effort: Optional[str] = None      # --effort <level>
     plan_mode: bool = False           # --plan
     continue_session: bool = False    # --continue
+    resume_session: Optional[str] = None  # --resume <id|name>
+    fork_session: bool = False        # --fork-session (with continue/resume)
+    session_name: Optional[str] = None    # -n <name>
+    compact_mode: Optional[str] = None    # --config compact-mode=<default|fast>
     yolo: bool = DEFAULT_YOLO         # --yolo
     max_turns: int = DEFAULT_MAX_TURNS
     add_dirs: list[str] = field(default_factory=list)  # --add-dir
     skip_onboarding: bool = True      # --skip-onboarding
+    trust: bool = DEFAULT_TRUST       # --trust
+    json_output: bool = DEFAULT_JSON_OUTPUT  # --output-format json
     timeout: int = DEFAULT_TIMEOUT
     cwd: Optional[Path] = None
     env: Optional[dict] = None
 
     def build_args(self, prompt: str) -> list[str]:
-        """Build the command argument list."""
+        """Build the command argument list.
+
+        The prompt always goes last: a prompt starting with "-" is then never
+        parsed as a flag, and no flag can be swallowed by the prompt argument.
+        """
         args = [DEFAULT_CMD_BIN]
 
         if self.yolo:
@@ -101,17 +161,33 @@ class ExecOptions:
         args.extend(("--max-turns", str(self.max_turns)))
         if self.model:
             args.extend(("-m", self.model))
+        if self.effort:
+            args.extend(("--effort", self.effort))
         if self.plan_mode:
             args.append("--plan")
-        if self.continue_session:
+
+        # --fork-session only means something together with a resumed session.
+        continuing = self.continue_session or self.fork_session
+        if self.resume_session:
+            args.extend(("--resume", self.resume_session))
+        elif continuing:
             args.append("--continue")
-        if self.skip_onboarding:
-            args.append("--skip-onboarding")
+        if self.fork_session:
+            args.append("--fork-session")
+
+        if self.session_name:
+            args.extend(("-n", self.session_name))
+        if self.compact_mode:
+            args.extend(("--config", f"compact-mode={self.compact_mode}"))
         for d in self.add_dirs:
             args.extend(("--add-dir", d))
+        if self.skip_onboarding:
+            args.append("--skip-onboarding")
+        if self.trust:
+            args.append("--trust")
+        if self.json_output:
+            args.extend(("--output-format", "json"))
 
-        # The prompt goes last so a prompt starting with "-" is not parsed as
-        # a flag, and so flags are never swallowed by the prompt argument.
         args.extend(("-p", prompt))
         return args
 
@@ -130,48 +206,87 @@ def _workdir(opts: "ExecOptions") -> str:
     return str(Path.cwd())
 
 
+def _terminate(proc: asyncio.subprocess.Process) -> None:
+    """Ask a child to stop, tolerating races with its own exit."""
+    try:
+        if os.name == "nt":
+            # Windows has no SIGINT delivery to another process group.
+            proc.terminate()
+        else:
+            proc.send_signal(signal.SIGINT)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 class RunningProcessTracker:
-    """
-    Track running subprocesses per chat to support /stop (interrupt).
+    """Track running subprocesses per chat to support /stop (interrupt).
 
-    Process-level singleton — one tracker per bot instance.
+    Foreground runs (the prompt the user is waiting on) and background runs
+    (/background) are tracked separately: starting a new prompt must kill the
+    previous *foreground* run, but it must not cancel background work.
     """
 
-    def __init__(self):
-        self._processes: dict[str, asyncio.subprocess.Process] = {}
-        self._bg_processes: set[asyncio.subprocess.Process] = set()
+    def __init__(self) -> None:
+        self._foreground: dict[str, asyncio.subprocess.Process] = {}
+        self._background: dict[str, list[asyncio.subprocess.Process]] = {}
+
+    # ── Registration ───────────────────────────────────────────────────
 
     def register(self, chat_id: str, proc: asyncio.subprocess.Process) -> None:
-        self._processes[chat_id] = proc
+        self._foreground[chat_id] = proc
 
     def unregister(self, chat_id: str) -> None:
-        self._processes.pop(chat_id, None)
+        self._foreground.pop(chat_id, None)
 
-    def register_bg(self, proc: asyncio.subprocess.Process) -> None:
-        self._bg_processes.add(proc)
+    def register_bg(self, chat_id: str, proc: asyncio.subprocess.Process) -> None:
+        procs = [p for p in self._background.get(chat_id, []) if p.returncode is None]
+        procs.append(proc)
+        self._background[chat_id] = procs
 
-    def unregister_bg(self, proc: asyncio.subprocess.Process) -> None:
-        self._bg_processes.discard(proc)
+    def unregister_bg(self, chat_id: str, proc: asyncio.subprocess.Process) -> None:
+        remaining = [
+            p for p in self._background.get(chat_id, []) if p is not proc
+        ]
+        if remaining:
+            self._background[chat_id] = remaining
+        else:
+            self._background.pop(chat_id, None)
+
+    # ── Introspection ──────────────────────────────────────────────────
 
     def get(self, chat_id: str) -> Optional[asyncio.subprocess.Process]:
-        return self._processes.get(chat_id)
+        """Return the running foreground process, if any (never a stale one)."""
+        proc = self._foreground.get(chat_id)
+        if proc is None or proc.returncode is not None:
+            return None
+        return proc
+
+    def is_running(self, chat_id: str) -> bool:
+        return self.get(chat_id) is not None
+
+    def background_count(self, chat_id: str) -> int:
+        return sum(
+            1
+            for p in self._background.get(chat_id, [])
+            if p.returncode is None
+        )
+
+    def background_total(self) -> int:
+        return sum(
+            sum(1 for p in procs if p.returncode is None)
+            for procs in self._background.values()
+        )
+
+    # ── Termination ────────────────────────────────────────────────────
 
     async def kill(self, chat_id: str) -> bool:
-        """Send SIGINT to a running process, escalate to SIGKILL after 3s."""
-        proc = self._processes.get(chat_id)
+        """Send SIGINT to the foreground process, escalate to SIGKILL after 3s."""
+        proc = self._foreground.get(chat_id)
         if proc is None or proc.returncode is not None:
+            self._foreground.pop(chat_id, None)
             return False
 
-        try:
-            if os.name == "nt":
-                # Windows has no SIGINT delivery to another process group.
-                proc.terminate()
-            else:
-                proc.send_signal(signal.SIGINT)
-        except (ProcessLookupError, PermissionError):
-            return False
-
-        # Escalate to SIGKILL after 3 seconds
+        _terminate(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=3.0)
         except asyncio.TimeoutError:
@@ -183,42 +298,60 @@ class RunningProcessTracker:
         self.unregister(chat_id)
         return True
 
-    async def kill_all(self) -> None:
-        """Kill all tracked processes (for graceful shutdown)."""
-        for chat_id in list(self._processes.keys()):
-            await self.kill(chat_id)
-        for proc in list(self._bg_processes):
-            if proc.returncode is None:
+    async def kill_background(self, chat_id: str) -> int:
+        """Stop every background run for a chat; return how many were stopped."""
+        procs = [
+            p for p in self._background.get(chat_id, []) if p.returncode is None
+        ]
+        self._background.pop(chat_id, None)
+        if not procs:
+            return 0
+
+        for proc in procs:
+            _terminate(proc)
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(p.wait() for p in procs)),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            for proc in procs:
                 try:
-                    if os.name == "nt":
-                        proc.terminate()
-                    else:
-                        proc.send_signal(signal.SIGINT)
-                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                except ProcessLookupError:
                     pass
-            self._bg_processes.discard(proc)
+        return len(procs)
+
+    async def kill_all(self) -> None:
+        """Kill every tracked process (for graceful shutdown)."""
+        background = self.background_total()
+        if background:
+            logger.info("Killing %d background process(es)", background)
+        for chat_id in list(self._foreground):
+            await self.kill(chat_id)
+        for chat_id in list(self._background):
+            await self.kill_background(chat_id)
 
 
 # Singleton
 process_tracker = RunningProcessTracker()
 
 
-async def run_cmd(
+# ── Runner ──────────────────────────────────────────────────────────────────
+
+
+async def _run(
     prompt: str,
     opts: ExecOptions,
     *,
     chat_id: Optional[str] = None,
+    background: bool = False,
+    on_progress=None,          # async callable(batch_text: str) -> None
+    batch_interval: float = 1.5,
+    max_preview_chars: int = 1500,
 ) -> CmdResult:
-    """
-    Run Command Code CLI as an async subprocess.
-
-    If chat_id is provided, the process is registered for /stop support
-    and any previous running process for that chat is killed first.
-
-    Returns a CmdResult with stdout, stderr, exit code, and signal info.
-    """
-    # Kill any previous process for this chat
-    if chat_id:
+    """Spawn one CLI run, read stdout line by line, and build a CmdResult."""
+    if chat_id and not background:
         await process_tracker.kill(chat_id)
 
     args = opts.build_args(prompt)
@@ -248,207 +381,11 @@ async def run_cmd(
             exit_code=-1,
         )
 
-    # Track for interrupt support
     if chat_id:
-        process_tracker.register(chat_id, proc)
-
-    try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=opts.timeout,
-        )
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        if chat_id:
-            process_tracker.unregister(chat_id)
-        return CmdResult(
-            stdout="",
-            stderr=f"⚠️ Command timed out after {opts.timeout}s.",
-            exit_code=-1,
-            killed_by_signal="SIGKILL (timeout)",
-        )
-    finally:
-        if chat_id:
-            process_tracker.unregister(chat_id)
-
-    stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-    stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-
-    exit_code = proc.returncode or 0
-    killed_by = None
-
-    # Check if killed by signal
-    if exit_code < 0:
-        sig_num = -exit_code
-        try:
-            killed_by = signal.Signals(sig_num).name
-        except ValueError:
-            killed_by = f"signal {sig_num}"
-
-    return CmdResult(
-        stdout=stdout,
-        stderr=stderr,
-        exit_code=exit_code,
-        killed_by_signal=killed_by,
-        success=(exit_code == 0 and not killed_by),
-    )
-
-
-async def run_cmd_streaming(
-    prompt: str,
-    opts: ExecOptions,
-    *,
-    chat_id: Optional[str] = None,
-) -> AsyncIterator[str]:
-    """
-    Run Command Code CLI and yield stdout lines as they arrive.
-
-    Real async streaming — reads stdout line-by-line while the process
-    runs.  Use this for displaying live progress to users.
-    """
-    args = opts.build_args(prompt)
-    cwd = _workdir(opts)
-    env = opts.env or os.environ
-
-    if chat_id:
-        await process_tracker.kill(chat_id)
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-        )
-    except (FileNotFoundError, PermissionError) as e:
-        yield f"❌ {e}"
-        return
-
-    if chat_id:
-        process_tracker.register(chat_id, proc)
-
-    stderr_lines: list[str] = []
-
-    async def _read_stderr() -> None:
-        if proc.stderr:
-            async for line in proc.stderr:
-                stderr_lines.append(line.decode("utf-8", errors="replace"))
-    stderr_task = asyncio.create_task(_read_stderr())
-
-    # Read stdout line-by-line, yielding in real time. Every read is bounded by
-    # an absolute deadline: a process that hangs with stdout open must not hang
-    # the bot forever.
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + opts.timeout
-    accumulated = ""
-    timed_out = False
-
-    try:
-        if proc.stdout:
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                try:
-                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    timed_out = True
-                    break
-                if not line:
-                    break
-                decoded = line.decode("utf-8", errors="replace")
-                accumulated += decoded
-                yield decoded
-
-        if not timed_out:
-            await stderr_task
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=max(deadline - loop.time(), 0.1))
-            except asyncio.TimeoutError:
-                timed_out = True
-
-        if timed_out:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            yield f"\n⚠️ Command timed out after {opts.timeout}s.\n"
-    finally:
-        if chat_id:
-            process_tracker.unregister(chat_id)
-        if not stderr_task.done():
-            stderr_task.cancel()
-
-    # Yield final status
-    stderr_text = "".join(stderr_lines)
-    exit_code = proc.returncode or 0
-
-    if exit_code != 0:
-        reason = EXIT_CODE_REASONS.get(exit_code, f"exit code {exit_code}")
-        if stderr_text.strip():
-            yield f"\n⚠️ {reason}: {stderr_text[:500]}\n"
+        if background:
+            process_tracker.register_bg(chat_id, proc)
         else:
-            yield f"\n⚠️ {reason}\n"
-    elif stderr_text.strip():
-        # Non-fatal stderr
-        yield f"\n{stderr_text[:500]}\n"
-
-
-async def run_cmd_with_progress(
-    prompt: str,
-    opts: ExecOptions,
-    *,
-    chat_id: Optional[str] = None,
-    on_progress=None,          # async callable(batch_text: str) → None
-    batch_interval: float = 1.5,
-    max_preview_chars: int = 1500,
-) -> CmdResult:
-    """
-    Run Command Code CLI with periodic progress callbacks.
-
-    Reads stdout line-by-line and calls ``on_progress`` every
-    *batch_interval* seconds (or when the accumulated buffer reaches a
-    natural paragraph break).  The callback receives the *last*
-    *max_preview_chars* characters of output — suitable for editing a
-    status message in-place.
-
-    Returns a normal CmdResult when the process finishes.
-    """
-    args = opts.build_args(prompt)
-    cwd = _workdir(opts)
-    env = opts.env or os.environ
-
-    if chat_id:
-        await process_tracker.kill(chat_id)
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-        )
-    except FileNotFoundError:
-        return CmdResult(
-            stdout="",
-            stderr=f"❌ Command '{DEFAULT_CMD_BIN}' not found.",
-            exit_code=-1,
-        )
-    except PermissionError:
-        return CmdResult(
-            stdout="",
-            stderr=f"❌ Permission denied running '{DEFAULT_CMD_BIN}'.",
-            exit_code=-1,
-        )
-
-    if chat_id:
-        process_tracker.register(chat_id, proc)
+            process_tracker.register(chat_id, proc)
 
     stderr_chunks: list[str] = []
 
@@ -459,17 +396,29 @@ async def run_cmd_with_progress(
 
     stderr_task = asyncio.create_task(_read_stderr())
 
-    accumulated: list[str] = []
+    raw_lines: list[str] = []
+    progress_lines: list[str] = []
+    result_frame: dict = {}
     loop = asyncio.get_running_loop()
-    last_callback = loop.time()
     deadline = loop.time() + opts.timeout
+    last_callback = loop.time()
     timed_out = False
 
-    def _recent_output() -> str:
-        full = "".join(accumulated)
-        if len(full) > max_preview_chars:
-            return "…" + full[-(max_preview_chars - 1):]
-        return full
+    def _progress_text() -> str:
+        if not progress_lines:
+            return "".join(raw_lines)[-max_preview_chars:]
+        text = "\n".join(progress_lines[-40:])
+        if len(text) > max_preview_chars:
+            return "…" + text[-(max_preview_chars - 1):]
+        return text
+
+    async def _report() -> None:
+        if not on_progress:
+            return
+        try:
+            await on_progress(_progress_text())
+        except Exception as exc:  # a progress edit must never kill the run
+            logger.debug("Progress callback failed: %s", exc)
 
     try:
         if proc.stdout:
@@ -479,7 +428,9 @@ async def run_cmd_with_progress(
                     timed_out = True
                     break
                 try:
-                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=remaining,
+                    )
                 except asyncio.TimeoutError:
                     timed_out = True
                     break
@@ -487,22 +438,27 @@ async def run_cmd_with_progress(
                     break
 
                 decoded = line.decode("utf-8", errors="replace")
-                accumulated.append(decoded)
+                raw_lines.append(decoded)
+
+                frame = parse_frame(decoded) if opts.json_output else None
+                if frame is None:
+                    text = decoded.rstrip()
+                    if text:
+                        progress_lines.append(text)
+                elif frame.kind == "result":
+                    result_frame = frame.result
+                elif frame.kind == "event":
+                    rendered = render_progress(frame.event)
+                    if rendered:
+                        progress_lines.append(rendered)
 
                 now = loop.time()
-                if on_progress and (now - last_callback >= batch_interval):
-                    try:
-                        await on_progress(_recent_output())
-                    except Exception as exc:
-                        logger.debug("Progress callback failed: %s", exc)
+                if on_progress and now - last_callback >= batch_interval:
+                    await _report()
                     last_callback = now
 
-        # Final progress callback with the remaining output
         if on_progress and not timed_out:
-            try:
-                await on_progress(_recent_output())
-            except Exception:
-                pass
+            await _report()
 
     finally:
         if timed_out:
@@ -513,20 +469,30 @@ async def run_cmd_with_progress(
 
         await stderr_task
 
+        reaped = True
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
         except asyncio.TimeoutError:
+            reaped = False
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
         finally:
             if chat_id:
-                process_tracker.unregister(chat_id)
+                if background:
+                    process_tracker.unregister_bg(chat_id, proc)
+                else:
+                    process_tracker.unregister(chat_id)
 
-    stdout = "".join(accumulated)
+    stdout = "".join(raw_lines)
     stderr = "".join(stderr_chunks)
-    exit_code = proc.returncode or 0
+    exit_code = proc.returncode
+    if exit_code is None:
+        # Killed but not reaped within the grace period: report a failure
+        # rather than pretending the run succeeded.
+        exit_code = -1
+        reaped = False
 
     killed_by = None
     if exit_code < 0:
@@ -536,10 +502,61 @@ async def run_cmd_with_progress(
         except ValueError:
             killed_by = f"signal {sig_num}"
 
+    parsed = render_result(result_frame) if result_frame else {}
+    subtype = parsed.get("subtype")
+    success = (
+        exit_code == 0
+        and reaped
+        and not killed_by
+        and not timed_out
+        and subtype != "error"
+    )
+
+    if timed_out:
+        timeout_line = f"⚠️ Command timed out after {opts.timeout}s."
+        stderr = f"{stderr}\n{timeout_line}".strip()
+        killed_by = "SIGKILL (timeout)"
+
     return CmdResult(
         stdout=stdout,
         stderr=stderr,
         exit_code=exit_code,
         killed_by_signal=killed_by,
-        success=(exit_code == 0 and not killed_by),
+        success=success,
+        final_text=parsed.get("final_text", ""),
+        session_id=parsed.get("session_id"),
+        usage=parsed.get("usage", {}),
+        duration_ms=parsed.get("duration_ms"),
+        stop_reason=parsed.get("stop_reason"),
+        subtype=subtype,
+    )
+
+
+async def run_cmd(
+    prompt: str,
+    opts: ExecOptions,
+    *,
+    chat_id: Optional[str] = None,
+    background: bool = False,
+) -> CmdResult:
+    """Run a prompt to completion (no live progress callbacks)."""
+    return await _run(prompt, opts, chat_id=chat_id, background=background)
+
+
+async def run_cmd_with_progress(
+    prompt: str,
+    opts: ExecOptions,
+    *,
+    chat_id: Optional[str] = None,
+    on_progress=None,          # async callable(batch_text: str) -> None
+    batch_interval: float = 1.5,
+    max_preview_chars: int = 1500,
+) -> CmdResult:
+    """Run a prompt, calling ``on_progress`` with a short activity log."""
+    return await _run(
+        prompt, opts,
+        chat_id=chat_id,
+        on_progress=on_progress,
+        batch_interval=batch_interval,
+        max_preview_chars=max_preview_chars,
     )

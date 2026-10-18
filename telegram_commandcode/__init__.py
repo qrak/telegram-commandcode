@@ -8,4 +8,4 @@ Bridges Telegram ↔ Command Code with Hermes Agent architecture:
 - Resilient chunking (smart 4096-char split + file fallback)
 """
 
-__version__ = "2.1.1"
+__version__ = "2.2.0"

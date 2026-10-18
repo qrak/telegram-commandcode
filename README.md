@@ -19,7 +19,7 @@ The repository contains two independent pieces:
 | Piece | Direction | Language | What it does |
 |---|---|---|---|
 | **MCP server** (`index.js`) | agent → Telegram | Node | Seven tools: send message / photo / file, read updates, react, download, health check |
-| **Bot daemon** (`telegram_commandcode/`) | Telegram → agent | Python | Chat with the local `cmd` CLI from your phone: 47 commands, streaming output, persistent sessions |
+| **Bot daemon** (`telegram_commandcode/`) | Telegram → agent | Python | Chat with the local `cmd` CLI from your phone: 48 commands, streaming output, persistent sessions |
 
 You can use either one alone. The MCP server is the part that works with every
 agent; the daemon is specific to the Command Code CLI.
@@ -94,6 +94,30 @@ Then message the bot: a plain message becomes a prompt for `cmd`, and slash
 commands map to the CLI — `/model`, `/plan`, `/review`, `/status`, `/stop` and
 43 more. Type `/` in Telegram to see the menu.
 
+### Sessions, compaction and forks
+
+The daemon keeps one Command Code session per chat and captures its id from
+each run (`--output-format json`), so the session history is not guesswork:
+
+| You want | Command | What actually happens |
+|---|---|---|
+| Continue where you left off | `/resume` | `--continue` on the next prompt |
+| Attach to a named/known session | `/resume <name\|id>` | `--resume <name>` on the next prompt |
+| Name the current session | `/rename <name>` | later runs pass `-n <name>` |
+| Branch off | `/fork [name]` | next prompt runs `--continue --fork-session -n <name>`; the original transcript is untouched |
+| Shrink the context | `/compact` | one read-only summarisation run builds a handoff brief, then a **new** session is seeded with it |
+| Step back N turns | `/undo [N]` | same brief, describing the state *before* the last N prompts; those prompts drop out of the history |
+| Wipe everything | `/clear` | new session, no brief |
+
+`/compact` and `/undo` make one extra model call; if it fails, nothing is
+changed and the bot says so. The handoff brief is injected exactly once, so it
+does not keep costing tokens on every later turn.
+
+Other settings are passed per run rather than written and forgotten:
+`/model` → `-m`, `/effort` → `--effort`, `/compact-mode` → `--config
+compact-mode=<default|fast>` (also persisted as `compactMode`).
+`/usage` and `/context` report the real token counts each run reports back.
+
 ### Configuration
 
 | Variable | Default | Meaning |
@@ -103,6 +127,8 @@ commands map to the CLI — `/model`, `/plan`, `/review`, `/status`, `/stop` and
 | `COMMAND_CODE_CMD` | `cmd` | Path to the Command Code binary |
 | `COMMAND_CODE_WORKDIR` | current directory | Where the agent runs |
 | `COMMAND_CODE_YOLO` | `true` | `false` runs the agent without `--yolo` |
+| `COMMAND_CODE_TRUST` | `true` | `false` omits `--trust` (project trust prompt) |
+| `COMMAND_CODE_JSON` | `true` | `false` drops `--output-format json` on older CLI builds; also loses session ids and token counts |
 | `COMMAND_CODE_MAX_TURNS` | `20` | Max turns per prompt |
 | `OPENAI_API_KEY` | — | Optional, enables voice transcription |
 
@@ -148,8 +174,8 @@ npm run deadcode               # knip: unused JS files, exports, dependencies
 
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest                         # 97 unit tests, no network, no `cmd` needed
-python -m vulture              # dead Python code; findings in docs/dead-code-audit.md
+pytest                         # 163 unit tests, no network, no `cmd` needed
+python -m vulture              # dead Python code (clean; see docs/dead-code-audit.md)
 ```
 
 CI runs both test suites on Linux and Windows.
@@ -161,7 +187,7 @@ index.js                     MCP server (the agent-facing part)
 package.json                 npm metadata, tests, bin
 telegram_commandcode/        Python bot daemon
   gateway/                   router, sender, processor, media
-  commands/                  slash-command handlers (47)
+  commands/                  slash-command handlers (48)
   executor.py                async `cmd` subprocess runner
   formatter.py, chunking.py  MarkdownV2 escaping and 4096-char splitting
 skill/                       publishable SKILL.md + references for agent

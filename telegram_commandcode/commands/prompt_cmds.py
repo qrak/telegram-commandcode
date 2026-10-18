@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Optional
 from telegram import Update
 
 from telegram_commandcode.formatter import escape_md2
-from telegram_commandcode.executor import ExecOptions, run_cmd
+from telegram_commandcode.executor import ExecOptions, process_tracker, run_cmd
 
 from .base import BaseCommandHandler
 
@@ -47,6 +47,8 @@ class PromptCommands(BaseCommandHandler):
 
     # ── /background ────────────────────────────────────────────────────
 
+    MAX_BACKGROUND = 3
+
     async def handle_background(
         self, update: Update, context, args: str,
     ) -> Optional[str]:
@@ -54,29 +56,49 @@ class PromptCommands(BaseCommandHandler):
             await self.send_md(
                 update,
                 "Usage: `/background <prompt>` — run a task in the background\\.\n\n"
+                "It runs in its own Command Code session, so it will not disturb "
+                "the conversation here\\. `/stop` cancels it\\. "
                 "You'll be notified here when it completes\\.",
             )
             return None
 
         chat_id = str(update.effective_chat.id)
         state = self.get_state(chat_id)
+
+        if process_tracker.background_count(chat_id) >= self.MAX_BACKGROUND:
+            await self.send_md(
+                update,
+                f"⚠️ Already running {self.MAX_BACKGROUND} background tasks\\. "
+                "Wait for one to finish, or `/stop` to cancel them\\.",
+            )
+            return None
+
         bg_id = f"bg_{uuid.uuid4().hex[:8]}"
 
-        await self.send_md(
+        await self._send_chunked(
             update,
-            f"🔄 Background task started: \"{escape_md2(args[:100])}\"\nTask ID: `{bg_id}`",
+            f"🔄 Background task started \\({escape_md2(bg_id)}\\):\n"
+            f"`{escape_md2(args[:100])}`\n\n"
+            "_Isolated session — `/stop` cancels it\\._",
         )
 
         async def _bg_task() -> None:
             try:
                 opts = ExecOptions(
                     model=state.model,
+                    effort=state.effort,
                     plan_mode=state.plan_mode,
-                    continue_session=state.active,
+                    # Deliberately not --continue: background work must not
+                    # attach to (and race with) this chat's foreground session.
+                    continue_session=False,
+                    compact_mode=state.compact_mode,
                     add_dirs=list(state.add_dirs),
+                    yolo=state.yolo,
                     timeout=1800,
                 )
-                result = await run_cmd(args, opts)
+                result = await run_cmd(
+                    args, opts, chat_id=chat_id, background=True,
+                )
                 out = result.output[:3800]
                 status = "✅" if result.success else "⚠️"
                 await self.send_md(

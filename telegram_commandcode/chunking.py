@@ -222,7 +222,6 @@ class FileFallbackResult:
     """Result when output is written to a file instead of chunking."""
     preview_message: str
     file_path: Path
-    should_send_as_file: bool = True
 
 
 def maybe_file_fallback(text: str, threshold: int = FILE_FALLBACK_THRESHOLD) -> Optional[FileFallbackResult]:

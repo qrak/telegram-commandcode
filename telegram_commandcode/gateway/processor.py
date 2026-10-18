@@ -15,13 +15,12 @@ from typing import TYPE_CHECKING, Set
 
 from telegram.ext import ContextTypes
 
-from telegram_commandcode.session import session_store
+from telegram_commandcode.session import ChatSession, session_store
 from telegram_commandcode.executor import (
     run_cmd_with_progress,
     ExecOptions,
-    process_tracker,
 )
-from telegram_commandcode.formatter import escape_md2
+from telegram_commandcode.formatter import escape_md2, format_message
 
 if TYPE_CHECKING:
     from .gateway import BotGateway
@@ -33,6 +32,55 @@ logger = logging.getLogger(__name__)
 def _sanitize_backticks(text: str) -> str:
     """Collapse runs of 3+ backticks to 2, preventing code-block injection."""
     return re.sub(r"```+", "``", text)
+
+
+# ── Prompt assembly ───────────────────────────────────────────────────
+
+def build_final_prompt(state: ChatSession, prompt: str) -> str:
+    """Combine the pending handoff brief, goal and steer with the prompt.
+
+    The compacted-context block is injected exactly once: the run that follows
+    a /compact or /undo seeds the new session with it, and the transcript then
+    carries it forward on its own.
+    """
+    parts: list[str] = []
+    if state.seed_context:
+        parts.append("[COMPACTED CONTEXT]\n" + state.seed_context)
+    if state.goal:
+        parts.append("[GOAL] " + state.goal)
+    if state.steer:
+        parts.append("[GUIDANCE] " + state.steer)
+    if not parts:
+        return prompt
+    return "\n\n".join(parts) + "\n\n" + prompt
+
+
+def merge_usage(total: dict, usage: dict) -> dict:
+    """Add one run's token usage into the chat's running totals."""
+    merged = dict(total or {})
+    for key, value in (usage or {}).items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            merged[key] = merged.get(key, 0) + value
+        else:
+            merged[key] = value
+    return merged
+
+
+def usage_footer(result) -> str:
+    """Short '⏱ 8.4s · 12,345→4,100 tok' line for the result message."""
+    parts: list[str] = []
+    if result.duration_ms:
+        parts.append(f"{result.duration_ms / 1000:.1f}s")
+    usage = result.usage or {}
+    tokens_in = usage.get("input_tokens")
+    tokens_out = usage.get("output_tokens")
+    if isinstance(tokens_in, int) and isinstance(tokens_out, int):
+        parts.append(f"{tokens_in:,}→{tokens_out:,} tok")
+    if result.stop_reason and result.stop_reason != "end_turn":
+        parts.append(str(result.stop_reason).replace("_", " "))
+    if not parts:
+        return ""
+    return "\n\n_" + " · ".join(parts) + "_"
 
 
 class PromptProcessor:
@@ -138,17 +186,18 @@ class PromptProcessor:
         # React immediately
         await self.gw.sender.set_reaction(chat_id, user_msg_id, "👀", bot=bot)
 
-        # Store prompt for /retry
-        session_store.update(chat_id_str, last_prompt=prompt)
+        # Store prompt for /retry and /undo
+        session_store.remember(chat_id_str, prompt)
 
-        # Used in error recovery (line 176, 190)
         send = self.gw.sender.send_message
         edit = self.gw.sender.edit_message
 
         try:
             truncated = prompt[:100]
             header = f"🚀 {media_desc}: " if media_desc else "🚀 Running: "
-            status_text = f"{header}`{escape_md2(truncated)}`"
+            # No inline code here: escape_md2 output inside `...` would render
+            # its backslashes literally, and prompts often contain backticks.
+            status_text = f"{header}{escape_md2(truncated)}"
             status_msg = await send(chat_id, status_text, bot=bot)
             status_msg_id = status_msg.message_id if status_msg else None
 
@@ -159,32 +208,24 @@ class PromptProcessor:
                     bot=bot,
                 )
 
-            # Build full prompt with goal/steer prefixes
-            prefix_parts = []
-            if state.goal:
-                prefix_parts.append(f"[GOAL] {state.goal}")
-            if state.steer:
-                prefix_parts.append(f"[GUIDANCE] {state.steer}")
-            final_prompt = (
-                "\n".join(prefix_parts) + "\n\n" + prompt
-                if prefix_parts
-                else prompt
-            )
-
-            if process_tracker.get(chat_id_str):
-                final_prompt = f"⚡ Previous execution interrupted.\n\n{final_prompt}"
+            final_prompt = build_final_prompt(state, prompt)
 
             opts = ExecOptions(
                 model=state.model,
+                effort=state.effort,
                 plan_mode=state.plan_mode,
                 continue_session=state.active,
+                resume_session=state.resume_target,
+                fork_session=bool(state.fork_next),
+                session_name=state.session_name,
+                compact_mode=state.compact_mode,
                 add_dirs=list(state.add_dirs),
                 yolo=state.yolo,
             )
 
             # ── Streaming progress callback ──
             # Edits the status message in-place every ~1.5s with the
-            # latest output so the user sees live progress, not a
+            # latest activity so the user sees live progress, not a
             # frozen "Processing..." message.
 
             last_edit = asyncio.get_event_loop().time()
@@ -199,15 +240,12 @@ class PromptProcessor:
                 if not status_msg_id:
                     return
 
-                # Show the most recent output as a live preview
                 preview = batch_text.strip()
                 if not preview:
                     return
 
-                # Build a compact live status: emoji + prefix + preview
-                # Don't use escape_md2 inside a code block — it produces
-                # literal backslashes the user can see. Instead, just
-                # sanitize any backtick sequences that could break the block.
+                # Don't escape inside a code block — escape_md2 would produce
+                # literal backslashes. Only sanitize backtick runs.
                 safe_preview = _sanitize_backticks(preview[:1200])
                 live_msg = (
                     f"🔄 *Working:* {escape_md2(truncated)}\n\n"
@@ -226,28 +264,46 @@ class PromptProcessor:
                 batch_interval=1.5,
             )
 
-            # Update session state
-            state.active = True
+            # ── Persist the outcome ──
             if state.one_shot_plan:
                 state.plan_mode = False
                 state.one_shot_plan = False
-            session_store.update(
-                chat_id_str,
-                active=True,
-                plan_mode=state.plan_mode,
-                one_shot_plan=state.one_shot_plan,
-            )
+
+            updates: dict = {
+                "active": True,
+                "plan_mode": state.plan_mode,
+                "one_shot_plan": state.one_shot_plan,
+            }
+            if result.session_id:
+                updates["session_id"] = result.session_id
+            if result.usage:
+                updates["last_usage"] = dict(result.usage)
+                updates["total_usage"] = merge_usage(state.total_usage, result.usage)
+            if result.duration_ms is not None:
+                updates["last_duration_ms"] = result.duration_ms
+            if state.seed_context:
+                updates["seed_context"] = None  # injected once
+            if state.resume_target:
+                updates["resume_target"] = None
+            if state.fork_next:
+                updates["fork_next"] = None
+                updates["session_name"] = state.fork_next
+            session_store.update(chat_id_str, **updates)
 
             is_error = result.is_error
             prefix = "⚠️" if is_error else "✅"
-            result_text = result.output or "(no output)"
+            label = "Failed" if is_error else "Done"
+            if is_error and result.exit_code != 0:
+                label = f"Failed · {result.human_reason}"
 
-            if len(result_text) > 3800:
-                result_text = result_text[:3800] + "\n...(truncated)"
+            result_text = result.output or "(no output)"
+            body = format_message(result_text)
+            if len(body) > 3800:
+                body = body[:3800] + "\n…(truncated)"
 
             done_msg = (
-                f"{prefix} *{'Failed' if is_error else 'Done'}:* "
-                f"{escape_md2(truncated)}\n\n{escape_md2(result_text)}"
+                f"{prefix} *{escape_md2(label)}:* "
+                f"{escape_md2(truncated)}\n\n{body}{usage_footer(result)}"
             )
 
             if status_msg_id:

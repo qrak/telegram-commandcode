@@ -4,17 +4,73 @@ All notable changes to this project. The MCP server is consumed directly from
 git (`npx github:qrak/telegram-commandcode`), so breaking changes ship to users
 the moment they land on `main`.
 
-## [Unreleased]
+## [2.2.0] — 2026-10-18
+
+Implements the recommendations from the dead-code audit: the daemon now uses
+the CLI flags that actually exist (`--resume`, `--fork-session`, `-n`,
+`--effort`, `--config`, `--output-format json`) instead of resetting state and
+hoping, and the dead code is gone.
 
 ### Added
 
-- `docs/dead-code-audit.md`: vulture (Python), ESLint and knip (JavaScript)
-  audit of dead code and of commands whose behaviour does not match their
-  description (`/compact`, `/compact-mode`, `/undo N`, `/fork`, `/rename`,
-  `/background`, the interactive CLI forwarders).
-- `vulture` in `dev` extras with a `[tool.vulture]` config that ignores the
-  dynamically dispatched `handle_*` methods.
-- `npm run deadcode` (knip) and `knip.json`; JS is currently clean.
+- **Real session lifecycle.** The session id is captured from
+  `--output-format json`, so `/resume <name|id>` (`--resume`), `/rename`
+  (`-n`) and `/fork` (`--continue --fork-session`) do what their names say.
+  `/session-file` shows the current id.
+- **`/compact` compacts.** One read-only summarisation run produces a handoff
+  brief; the next prompt starts a fresh session seeded with it, injected once.
+  A failed run leaves the session untouched.
+- **`/undo [N]` honours N.** It drops the last N prompts from the history and
+  seeds the new session with a brief describing the state *before* them.
+- **`/usage` and `/context` report real numbers** — tokens in/out, duration and
+  session id from the CLI result, plus per-chat totals. The result message gets
+  a small `8.4s · 12,345→4,100 tok` footer.
+- **`/compact-mode`** accepts the documented values (`default`, `fast`) and is
+  passed per run as `--config compact-mode=…`, persisted as `compactMode`.
+- **`/effort`** is passed as `--effort` instead of only writing config.json.
+- **`/provider`** validates against the documented auth providers and explains
+  that a new process (and maybe `cmd login`) is needed.
+- **`/login`** explains the host-side login (or `COMMAND_CODE_API_KEY`) and
+  shows `cmd status --json`, instead of spawning a browser it cannot show.
+  `/feedback <text>` passes the text; `/logout` warns that credentials are
+  shared with the host CLI; `/update check` runs `--check-only`.
+- **Background tasks are tracked separately.** `/stop` cancels the foreground
+  prompt *and* the background tasks and reports both counts.
+- 66 new tests (163 total): JSON frame parsing, new CLI flags, process-tracker
+  foreground/background isolation, prompt assembly, usage accounting, and the
+  compact/undo/fork/rename/config handlers.
+- Live progress is rendered from JSON `tool_running` events ("⚙️ read: app.py")
+  instead of raw stdout.
+
+### Changed
+
+- Model output now goes through `format_message()`, so headings, code fences
+  and GFM tables render on Telegram instead of showing literal `**` and `|`.
+- `--trust` is passed by default (`COMMAND_CODE_TRUST=false` to omit it), so a
+  first-time project does not stall an automated run.
+- `/mcp`, `/skills`, `/taste`, `/learn-taste` and `/feedback` pass their
+  arguments through instead of appending a bogus `list`.
+
+### Fixed
+
+- `/background` used to `--continue` the chat's own session — racing the
+  foreground lock and polluting the transcript. It now runs in an isolated
+  session and cannot be stopped by `/stop` (it now can).
+- When Telegram rejected MarkdownV2, the plain-text fallback resent the
+  *escaped* text, showing backslashes. It now sends `strip_mdv2()` output.
+- Subcommands that need a terminal (`cmd login`) report that instead of a bare
+  "Command timed out".
+
+### Removed
+
+~350 lines of dead code found by vulture: `run_cmd_streaming`, `wrap_code`,
+`wrap_inline_code`, `bold`, `italic`, `link`, `escape_user_input`,
+`safe_send_params`, `try_parse_fallback`, `classify_error`, `all_sessions`,
+`FileFallbackResult.should_send_as_file`, and the unused
+`VALID_EFFORT_LEVELS` copy in the router. `format_message()` and its table
+helpers were wired into the result path instead of deleted. `/configure-models`
+now reports effort and compact mode rather than misreading `permissions` as
+per-task model overrides.
 
 ## [2.1.1] — 2026-10-18
 
