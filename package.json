@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/mcp.test.mjs"
+    "test": "node --test test/mcp.test.mjs",
+    "deadcode": "npx --yes knip@5 --no-progress"
   },
   "keywords": [
     "mcp",

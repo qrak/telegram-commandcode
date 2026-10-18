@@ -4,6 +4,18 @@ All notable changes to this project. The MCP server is consumed directly from
 git (`npx github:qrak/telegram-commandcode`), so breaking changes ship to users
 the moment they land on `main`.
 
+## [Unreleased]
+
+### Added
+
+- `docs/dead-code-audit.md`: vulture (Python), ESLint and knip (JavaScript)
+  audit of dead code and of commands whose behaviour does not match their
+  description (`/compact`, `/compact-mode`, `/undo N`, `/fork`, `/rename`,
+  `/background`, the interactive CLI forwarders).
+- `vulture` in `dev` extras with a `[tool.vulture]` config that ignores the
+  dynamically dispatched `handle_*` methods.
+- `npm run deadcode` (knip) and `knip.json`; JS is currently clean.
+
 ## [2.1.1] — 2026-10-18
 
 Review pass after 2.1.0. Everything below was found by reading the code and

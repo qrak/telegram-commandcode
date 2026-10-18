@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 voice = ["openai>=1.0"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "vulture>=2.11"]
 
 [project.scripts]
 telegram-commandcode = "telegram_commandcode.bot:main"
@@ -40,3 +40,10 @@ target-version = "py311"
 # Formatting is not enforced — the codebase predates this config.
 select = ["E", "F", "W"]
 ignore = ["E501"]
+
+[tool.vulture]
+# Slash-command handlers are dispatched by name through CommandRouter's
+# {"/command": "method_name"} table, which vulture cannot see.
+paths = ["telegram_commandcode"]
+min_confidence = 60
+ignore_names = ["handle_*"]

@@ -143,14 +143,16 @@ by design. Do not put production credentials on the host.
 
 ```bash
 npm install
-npm test                       # MCP protocol tests (spawns the real server)
+npm test                       # 6 MCP protocol tests (spawns the real server)
+npm run deadcode               # knip: unused JS files, exports, dependencies
 
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 pytest                         # 97 unit tests, no network, no `cmd` needed
+python -m vulture              # dead Python code; findings in docs/dead-code-audit.md
 ```
 
-CI runs both suites on Linux and Windows.
+CI runs both test suites on Linux and Windows.
 
 ## Repository layout
 

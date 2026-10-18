@@ -67,11 +67,18 @@ telegram_commandcode/
 ## Testing
 
 ```bash
-npm test                                  # 4 protocol tests, ~3 s
+npm test                                  # 6 protocol tests, ~4 s
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]" && pytest         # 97 tests, ~2 s
 node scripts/build-skill.mjs              # validates SKILL.md frontmatter
+
+python -m vulture                         # dead Python code (config in pyproject)
+npm run deadcode                          # knip: unused JS files/exports/deps
 ```
+
+`vulture` currently exits non-zero: the remaining hits are real dead code,
+catalogued in `docs/dead-code-audit.md`. It is a report, not a CI gate, until
+that list is cleaned up.
 
 Nothing in the test suite needs a Telegram token, network access, or the
 Command Code binary. If a change needs one of those to test, it needs a
