@@ -10,6 +10,14 @@ Two deliverables in one repository:
 `legacy/` holds the original Node bot. Archived, unsupported, excluded from the
 npm package. Do not add features there.
 
+## Status: daemon frozen, MCP server maintained
+
+The MCP server is where new work goes. The bot daemon is feature-frozen at
+2.2.0: fix bugs, do not add commands or flags. Command Code now ships its own
+Telegram bridge (`/rc`, announced 2026-09-29) for its own sessions, so a new
+daemon feature would be re-implementing a vendor feature. The daemon remains
+for self-hosting a bot on a server and for driving a CLI from chat.
+
 ## Repository map
 
 ```

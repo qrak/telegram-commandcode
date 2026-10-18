@@ -4,6 +4,16 @@ All notable changes to this project. The MCP server is consumed directly from
 git (`npx github:qrak/telegram-commandcode`), so breaking changes ship to users
 the moment they land on `main`.
 
+## [Unreleased]
+
+### Documentation
+
+- README now leads with the MCP server as the maintained part and says plainly
+  that Command Code ships its own Telegram bridge (`/rc`, 2026-09-29), so the
+  bot daemon is not needed for "Command Code on my phone". The daemon is
+  frozen at 2.2.0: bug fixes only, no new commands or flags. `AGENTS.md`
+  records the same rule so future work goes to the MCP server.
+
 ## [2.2.0] — 2026-10-18
 
 Implements the recommendations from the dead-code audit: the daemon now uses

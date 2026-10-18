@@ -19,10 +19,33 @@ The repository contains two independent pieces:
 | Piece | Direction | Language | What it does |
 |---|---|---|---|
 | **MCP server** (`index.js`) | agent → Telegram | Node | Seven tools: send message / photo / file, read updates, react, download, health check |
-| **Bot daemon** (`telegram_commandcode/`) | Telegram → agent | Python | Chat with the local `cmd` CLI from your phone: 48 commands, streaming output, persistent sessions |
+| **Bot daemon** (`telegram_commandcode/`) | Telegram → agent | Python | 48 commands, streaming output, persistent sessions; frozen at 2.2.0 (see status below) |
 
 You can use either one alone. The MCP server is the part that works with every
-agent; the daemon is specific to the Command Code CLI.
+agent; the daemon is specific to the Command Code CLI — and not needed at all
+if you already use Command Code's own `/rc`.
+
+### Command Code ships this itself now
+
+If you use Command Code and just want it on your phone, the daemon below is
+redundant: since [Remote
+Control](https://commandcode.ai/docs/remote-control) (announced
+[2026-09-29](https://commandcode.ai/blog/remote-control-now-available-in-command-code))
+an open session can be driven from Telegram or Discord with `/rc`.
+
+| | Command Code `/rc` | MCP server (this repo) | Bot daemon (this repo) |
+|---|---|---|---|
+| Direction | live session ↔ chat | any agent → chat, replies back | chat drives a CLI |
+| Works with | Command Code only | any MCP client | Command Code only |
+| Needs an open session | yes | no | no |
+
+**Status:** the MCP server is the maintained part. The daemon is frozen at
+2.2.0 — correct and tested, still useful for self-hosting a bot on a server or
+driving a CLI from a chat, but it gets no new features.
+
+The MCP server is the part `/rc` does not replace: it works with every agent,
+it can notify you from a CI job or a short-lived agent that has no session to
+keep open, and it reads your replies back.
 
 ## Quick start — MCP server
 
