@@ -156,6 +156,14 @@ async def _on_shutdown(app: Application) -> None:
 
 def main() -> None:
     """Entry point for `telegram-commandcode` console script."""
+    # Windows consoles default to a legacy code page; log lines and error
+    # messages contain emoji, which would otherwise print as \uXXXX escapes.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         for env_path in (
