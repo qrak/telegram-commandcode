@@ -165,3 +165,48 @@ test("send_message without chat_id fails before any network call", async () => {
     await server.stop();
   }
 });
+
+test("messages over 4096 characters are rejected client-side", async () => {
+  const server = startServer({
+    TELEGRAM_BOT_TOKEN: "123456:TEST",
+    TELEGRAM_DEFAULT_CHAT_ID: "42",
+  });
+  try {
+    await handshake(server);
+    server.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: {
+        name: "telegram_send_message",
+        arguments: { text: "x".repeat(4097) },
+      },
+    });
+    const reply = await server.waitFor((m) => m.id === 5);
+    assert.equal(reply.result.isError, true);
+    assert.match(reply.result.content[0].text, /4096/);
+  } finally {
+    await server.stop();
+  }
+});
+
+test("reaction without a chat id fails before any network call", async () => {
+  const server = startServer({ TELEGRAM_BOT_TOKEN: "123456:TEST" });
+  try {
+    await handshake(server);
+    server.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: {
+        name: "telegram_send_reaction",
+        arguments: { message_id: 1, emoji: "👀" },
+      },
+    });
+    const reply = await server.waitFor((m) => m.id === 6);
+    assert.equal(reply.result.isError, true);
+    assert.match(reply.result.content[0].text, /chat_id/i);
+  } finally {
+    await server.stop();
+  }
+});
