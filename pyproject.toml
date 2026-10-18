@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "telegram-commandcode"
-version = "2.1.0"
+version = "2.1.1"
 description = "Async Python Telegram bot bridging Telegram ↔ Command Code CLI — Hermes Agent architecture patterns"
 authors = [{ name = "qrak" }]
 license = { text = "MIT" }
@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 voice = ["openai>=1.0"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
 
 [project.scripts]
 telegram-commandcode = "telegram_commandcode.bot:main"
@@ -28,4 +28,15 @@ packages = ["telegram_commandcode"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+asyncio_mode = "auto"
 filterwarnings = ["error::SyntaxWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Only correctness rules: undefined names, unused imports, unreachable code.
+# Formatting is not enforced — the codebase predates this config.
+select = ["E", "F", "W"]
+ignore = ["E501"]
