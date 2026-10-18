@@ -1,6 +1,6 @@
 {
   "name": "telegram-commandcode",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "MCP server that lets a coding agent send Telegram messages, files, photos and read replies back",
   "main": "index.js",
   "type": "module",

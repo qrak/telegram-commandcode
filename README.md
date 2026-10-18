@@ -147,7 +147,7 @@ npm test                       # MCP protocol tests (spawns the real server)
 
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest                         # 36 unit tests, no network, no `cmd` needed
+pytest                         # 97 unit tests, no network, no `cmd` needed
 ```
 
 CI runs both suites on Linux and Windows.

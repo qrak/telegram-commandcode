@@ -18,7 +18,7 @@ package.json                  npm metadata, bin, npm test
 scripts/build-skill.mjs       builds dist/telegram-bridge-skill.zip
 skill/                        publishable SKILL.md + 4 reference docs
 test/mcp.test.mjs             node:test protocol tests (spawns the server)
-tests/                        pytest suite (36 tests, no network, no `cmd`)
+tests/                        pytest suite (97 tests, no network, no `cmd`)
 legacy/                       old Node bot + Discord bridge (archived)
 deploy/                       systemd unit
 
@@ -69,7 +69,7 @@ telegram_commandcode/
 ```bash
 npm test                                  # 4 protocol tests, ~3 s
 python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]" && pytest         # 36 tests, ~1 s
+pip install -e ".[dev]" && pytest         # 97 tests, ~2 s
 node scripts/build-skill.mjs              # validates SKILL.md frontmatter
 ```
 

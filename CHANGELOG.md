@@ -4,6 +4,47 @@ All notable changes to this project. The MCP server is consumed directly from
 git (`npx github:qrak/telegram-commandcode`), so breaking changes ship to users
 the moment they land on `main`.
 
+## [2.1.1] — 2026-10-18
+
+Review pass after 2.1.0. Everything below was found by reading the code and
+covered by a regression test.
+
+### Fixed
+
+- **MarkdownV2 was double-escaped inside code fences.** CLI output, model lists
+  and `/configure-models` were passed through `escape_md2()` before being
+  wrapped in ```` ``` ````, so users saw literal `\.` and `\-` inside code blocks.
+  Code-fence content now uses `escape_code_block()` (backtick and backslash
+  only).
+- **`run_cli` leaked the child process on timeout.** `asyncio.wait_for()` cancels
+  the wait, not the process; a hung `cmd` stayed alive. It is now killed and
+  reaped.
+- **Auto-attached files did not work on Windows.** The path regex only matched
+  POSIX roots and `MEDIA:/…`; `MEDIA:C:\…` and quoted paths with spaces were
+  ignored. Bare-path scanning is also no longer fooled by a quoted path.
+- **Temp files leaked** after the >15 000-character "send as file" fallback, in
+  both the sender and the command layer.
+- **Empty messages were sent** through `_send_chunked`, which Telegram rejects
+  with `message text is empty`.
+- `/reload` exited via `os._exit()` without killing running `cmd` children; it
+  now stops them first and says that a supervisor is required to come back.
+- `getMe()` failure during startup of a message no longer drops the update.
+- `chat_id` was required for reactions but silently omitted when neither the
+  argument nor the default was set — it now fails with an actionable message.
+- Deprecated `asyncio.get_event_loop()` calls replaced with
+  `time.monotonic()` / `time.time_ns()`.
+
+### Added
+
+- 61 new tests (97 total): message sender (chunking, parse fallback, file
+  fallback, error classification), path detection (POSIX, Windows, quoted),
+  command plumbing (code-block escaping, CLI timeouts, config I/O), gateway
+  (rate limiting, identity caching), media auto-attach, dispatch-table
+  consistency and representative slash-command handlers.
+- `ruff` with a correctness-only rule set (E/F/W) in `dev` extras and CI.
+- Two more MCP protocol tests: >4096 characters rejected client-side, reaction
+  without a chat id fails before any network call.
+
 ## [2.1.0] — 2026-10-18
 
 ### Fixed
