@@ -1,41 +1,45 @@
 {
   "name": "telegram-commandcode",
-  "version": "1.0.0",
-  "description": "MCP server for Telegram integration with Command Code — send messages, files, and photos from your coding agent",
+  "version": "2.1.0",
+  "description": "MCP server that lets a coding agent send Telegram messages, files, photos and read replies back",
   "main": "index.js",
   "type": "module",
   "bin": {
-    "telegram-commandcode": "./index.js",
-    "telegram-commandcode-bot": "./bot.js",
-    "telegram-commandcode-discord": "./discord.js"
+    "telegram-commandcode": "./index.js"
   },
   "files": [
     "index.js",
-    "bot.js",
-    "discord.js"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "start": "node index.js",
-    "start:bot": "node bot.js",
-    "start:discord": "node discord.js"
+    "test": "node --test test/mcp.test.mjs"
   },
   "keywords": [
-    "commandcode",
     "mcp",
+    "model-context-protocol",
     "telegram",
-    "bot",
+    "telegram-bot",
     "coding-agent",
-    "command-code"
+    "claude-code",
+    "cursor",
+    "command-code",
+    "notifications",
+    "agent-skills"
   ],
   "author": "qrak",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/qrak/telegram-commandcode"
+    "url": "git+https://github.com/qrak/telegram-commandcode.git"
   },
+  "bugs": {
+    "url": "https://github.com/qrak/telegram-commandcode/issues"
+  },
+  "homepage": "https://github.com/qrak/telegram-commandcode#readme",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "discord.js": "^14.26.4"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "engines": {
     "node": ">=18"
