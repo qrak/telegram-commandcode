@@ -75,7 +75,11 @@ function buildZip(files, root) {
   for (const file of files) {
     const name = relative(root, file).split(sep).join("/");
     const nameBytes = Buffer.from(name, "utf8");
-    const content = readFileSync(file);
+    // Normalise line endings so the artifact is identical on Windows and Linux.
+    const content = Buffer.from(
+      readFileSync(file, "utf8").replace(/\r\n/g, "\n"),
+      "utf8",
+    );
     const compressed = deflateRawSync(content, { level: 9 });
     const crc = crc32(content);
 
@@ -138,7 +142,8 @@ function buildZip(files, root) {
 const skillFile = join(SOURCE, "SKILL.md");
 let skill;
 try {
-  skill = readFileSync(skillFile, "utf8");
+  // A Windows checkout has CRLF; the frontmatter parser below expects LF.
+  skill = readFileSync(skillFile, "utf8").replace(/\r\n/g, "\n");
 } catch {
   console.error(`Missing ${skillFile}`);
   process.exit(1);

@@ -1,0 +1,8 @@
+# Normalise line endings so scripts, tests and the skill artifact behave the
+# same on Linux and Windows. Binary files are detected by git.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.zip binary
