@@ -19,7 +19,7 @@ from telegram_commandcode.formatter import escape_md2
 from .base import BaseCommandHandler
 
 if TYPE_CHECKING:
-    from telegram.ext import ContextTypes
+    pass
 
 # CLI subcommand mapping: cc_slash → (subcommand_args, status_msg)
 CLI_MAP: dict[str, tuple[list[str], str]] = {

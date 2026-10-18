@@ -11,14 +11,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import TYPE_CHECKING, Optional, Set
+from typing import TYPE_CHECKING, Set
 
-from telegram import Update
 from telegram.ext import ContextTypes
 
 from telegram_commandcode.session import session_store
 from telegram_commandcode.executor import (
-    run_cmd,
     run_cmd_with_progress,
     ExecOptions,
     process_tracker,

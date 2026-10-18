@@ -11,15 +11,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from telegram import Update
 
 from telegram_commandcode.session import ChatSession, session_store
 from telegram_commandcode.executor import DEFAULT_CMD_BIN
-from telegram_commandcode.formatter import escape_md2
+from telegram_commandcode.formatter import escape_code_block
 from telegram_commandcode.chunking import (
     truncate_message,
     chunk_escaped,
@@ -27,7 +28,7 @@ from telegram_commandcode.chunking import (
 )
 
 if TYPE_CHECKING:
-    from telegram.ext import ContextTypes
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class BaseCommandHandler:
     ) -> None:
         """Send text, splitting into code-block-aware chunks with fallback."""
         chat = update.effective_chat
-        if not chat:
+        if not chat or not text or not text.strip():
             return
 
         # File fallback for very long outputs
@@ -93,6 +94,9 @@ class BaseCommandHandler:
                     return
                 except Exception as exc:
                     logger.warning("File fallback failed: %s", exc)
+                finally:
+                    with suppress(OSError):
+                        fallback.file_path.unlink()
 
         chunks = truncate_message(text)
         escaped = chunk_escaped(chunks)
@@ -117,6 +121,7 @@ class BaseCommandHandler:
 
     async def run_cli(self, args: list[str], timeout: int = 30) -> str:
         """Run a Command Code CLI subcommand and return its output string."""
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 DEFAULT_CMD_BIN, *args,
@@ -130,6 +135,12 @@ class BaseCommandHandler:
             err = stderr.decode("utf-8", errors="replace").strip()
             return out or err or f"(exit {proc.returncode})"
         except asyncio.TimeoutError:
+            # wait_for cancels the wait, not the child: kill it or it leaks.
+            if proc is not None and proc.returncode is None:
+                with suppress(ProcessLookupError):
+                    proc.kill()
+                with suppress(ProcessLookupError):
+                    await proc.wait()
             return "⚠️ Command timed out."
         except FileNotFoundError:
             return f"❌ Command '{DEFAULT_CMD_BIN}' not found."
@@ -146,7 +157,7 @@ class BaseCommandHandler:
             await chat.send_chat_action("typing")
             output = await _run_cli(...)
             capped = output[:3800] + ... if len(output) > 3800 else output
-            await _send_chunked(update, f"```\n{escape_md2(capped)}\n```")
+            await _send_chunked(update, f"```\n{escape_code_block(capped)}\n```")
         """
         chat = update.effective_chat
         if chat:
@@ -158,7 +169,7 @@ class BaseCommandHandler:
                 if len(output) > 3800
                 else output
             )
-            await self._send_chunked(update, f"```\n{escape_md2(capped)}\n```")
+            await self._send_chunked(update, f"```\n{escape_code_block(capped)}\n```")
         else:
             await self._send_chunked(update, output)
 

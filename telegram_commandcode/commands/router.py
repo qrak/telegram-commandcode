@@ -94,7 +94,6 @@ class CommandRouter:
         if not text.startswith("/"):
             return None
 
-        chat_id = str(update.effective_chat.id)
         parts = text.split(maxsplit=1)
         raw_cmd = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""

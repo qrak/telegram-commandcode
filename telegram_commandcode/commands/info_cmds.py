@@ -6,22 +6,21 @@ All purely local (Lane A) — no LLM execution, no prompt forwarding.
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import os
 from typing import TYPE_CHECKING, Optional
 
 from telegram import Update
 
-from telegram_commandcode.session import ChatSession
 from telegram_commandcode.executor import DEFAULT_CMD_BIN, DEFAULT_MAX_TURNS
 from telegram_commandcode.formatter import escape_md2
 
 from .base import BaseCommandHandler
 
 if TYPE_CHECKING:
-    from telegram.ext import ContextTypes
+    pass
 
-logger = __import__("logging").getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class InfoCommands(BaseCommandHandler):
@@ -338,10 +337,16 @@ class InfoCommands(BaseCommandHandler):
     async def handle_reload(
         self, update: Update, context, args: str,
     ) -> Optional[str]:
+        from telegram_commandcode.executor import process_tracker
+
         await self.send_md(
             update,
-            "🔄 Restarting bot... Session state will be preserved in config\\.",
+            "🔄 Restarting bot\\. Session state is preserved\\.\n\n"
+            "_A supervisor \\(systemd, Docker restart policy\\) is required to bring it back up\\._",
         )
+        # Exit hard (so a supervisor restarts us) but take the agent processes
+        # with us — os._exit() skips shutdown hooks, so kill them first.
+        await process_tracker.kill_all()
         os._exit(0)
 
     # ── Fallback handlers used by CommandRouter ────────────────────────

@@ -121,21 +121,23 @@ async def _on_startup(app: Application) -> None:
     me = await app.bot.get_me()
     logger.info("   Bot: @%s (%s)", me.username, me.first_name)
     logger.info("   CMD: %s", os.getenv("COMMAND_CODE_CMD", "cmd"))
-    logger.info("   Access: %s", os.getenv("TELEGRAM_ALLOWED_USERS", "any"))
+
+    allowed = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
+    if not allowed:
+        logger.warning(
+            "   Access: LOCKED — no TELEGRAM_ALLOWED_USERS set. "
+            "Send /start to the bot to learn your numeric id."
+        )
+    elif "any" in {part.strip() for part in allowed.split(",")}:
+        logger.warning("   Access: OPEN — anyone who finds this bot can drive the agent.")
+    else:
+        logger.info("   Access: %s", allowed)
 
     try:
         await app.bot.set_my_commands(BOT_COMMANDS)
         logger.info("   %d commands registered", len(BOT_COMMANDS))
     except Exception as e:
         logger.warning("   ⚠️ Failed to register commands: %s", e)
-
-    try:
-        updates = await app.bot.get_updates()
-        if updates:
-            await app.update_queue.put(None)
-            logger.info("   Cleared %d pending updates", len(updates))
-    except Exception:
-        pass
 
     logger.info("   Listening... (Ctrl+C to stop)")
 

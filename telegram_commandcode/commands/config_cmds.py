@@ -11,12 +11,12 @@ from typing import TYPE_CHECKING, Optional
 
 from telegram import Update
 
-from telegram_commandcode.formatter import escape_md2
+from telegram_commandcode.formatter import escape_code_block, escape_md2
 
 from .base import BaseCommandHandler
 
 if TYPE_CHECKING:
-    from telegram.ext import ContextTypes
+    pass
 
 VALID_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
@@ -90,7 +90,7 @@ class ConfigCommands(BaseCommandHandler):
 
         await self._send_chunked(
             update,
-            f"🤖 *Available models*\n\n```\n{escape_md2(preview)}\n```\n"
+            f"🤖 *Available models*\n\n```\n{escape_code_block(preview)}\n```\n"
             f"{current}\n"
             f"_Use `/model <name>` to switch, e\\.g\\. `/model claude\\-sonnet\\-4\\-6`_",
         )
@@ -135,14 +135,14 @@ class ConfigCommands(BaseCommandHandler):
                 await self.send_md(
                     update,
                     f"🧠 Current effort for `{escape_md2(current_model)}`: *{escape_md2(current_effort)}*\n\n"
-                    f"Valid levels: {', '.join(f'`{l}`' for l in VALID_EFFORT_LEVELS)}\n\n"
+                    f"Valid levels: {', '.join(f'`{lv}`' for lv in VALID_EFFORT_LEVELS)}\n\n"
                     f"Use `/effort <level>` to change it\\.",
                 )
             else:
                 await self.send_md(
                     update,
                     f"🧠 No effort set for `{escape_md2(current_model)}` (uses model default)\\.\n\n"
-                    f"Valid levels: {', '.join(f'`{l}`' for l in VALID_EFFORT_LEVELS)}\n\n"
+                    f"Valid levels: {', '.join(f'`{lv}`' for lv in VALID_EFFORT_LEVELS)}\n\n"
                     f"Use `/effort <level>` to set it\\.",
                 )
             return None
@@ -151,7 +151,7 @@ class ConfigCommands(BaseCommandHandler):
         if level not in VALID_EFFORT_LEVELS:
             await self.send_md(
                 update,
-                f"❌ Invalid effort level\\. Valid: {', '.join(f'`{l}`' for l in VALID_EFFORT_LEVELS)}",
+                f"❌ Invalid effort level\\. Valid: {', '.join(f'`{lv}`' for lv in VALID_EFFORT_LEVELS)}",
             )
             return None
 
@@ -197,7 +197,7 @@ class ConfigCommands(BaseCommandHandler):
             f"• Provider: `{escape_md2(current_provider)}`\n"
             f"• Default model: `{escape_md2(current_model)}`\n"
             f"{task_section}\n"
-            f"*Available models:*\n```\n{escape_md2(models_out[:800])}\n```\n"
+            f"*Available models:*\n```\n{escape_code_block(models_out[:800])}\n```\n"
             f"\\- Use `/model <name>` to switch the default model\n"
             f"\\- Use `/provider <name>` to switch provider\n"
             f"\\- Set per\\-task overrides via CC config or the TUI\n"

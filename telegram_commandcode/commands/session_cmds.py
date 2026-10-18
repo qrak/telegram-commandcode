@@ -15,7 +15,7 @@ from telegram_commandcode.formatter import escape_md2
 from .base import BaseCommandHandler
 
 if TYPE_CHECKING:
-    from telegram.ext import ContextTypes
+    pass
 
 
 class SessionCommands(BaseCommandHandler):

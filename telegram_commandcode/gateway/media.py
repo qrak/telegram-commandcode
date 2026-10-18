@@ -7,9 +7,9 @@ Voice transcription requires OPENAI_API_KEY.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from tempfile import gettempdir
 from typing import TYPE_CHECKING, Optional
@@ -44,7 +44,7 @@ class MediaHandler:
             if not file_info or not file_info.file_path:
                 return None
 
-            local_name = f"{int(asyncio.get_event_loop().time())}_{file_id[:8]}{ext}"
+            local_name = f"{time.time_ns()}_{file_id[:8]}{ext}"
             local_path = DOWNLOAD_DIR / local_name
             await file_info.download_to_drive(custom_path=str(local_path))
             return local_path if local_path.exists() else None

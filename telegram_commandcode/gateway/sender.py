@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from tempfile import gettempdir
+import time
+from contextlib import suppress
 from typing import TYPE_CHECKING, Optional
 
-from telegram_commandcode.formatter import strip_mdv2, escape_md2
-from telegram_commandcode.chunking import truncate_message, chunk_escaped, maybe_file_fallback, find_file_paths
+from telegram_commandcode.formatter import strip_mdv2
+from telegram_commandcode.chunking import truncate_message, chunk_escaped, maybe_file_fallback
 
 if TYPE_CHECKING:
     from .gateway import BotGateway
@@ -138,12 +139,15 @@ async def _send_message_safe(
                     await bot.send_document(
                         chat_id=chat_id,
                         document=f,
-                        filename=f"cc_output_{int(asyncio.get_event_loop().time())}.txt",
+                        filename=f"cc_output_{time.time_ns()}.txt",
                         caption="📄 Full output (too long for chat)",
                     )
                 return last_msg
             except Exception as e:
                 logger.warning("File fallback failed: %s", e)
+            finally:
+                with suppress(OSError):
+                    fallback.file_path.unlink()
 
     # Chunk using Hermes-patterned truncate_message
     chunks = truncate_message(text)

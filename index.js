@@ -485,8 +485,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       case "telegram_send_reaction": {
+        const chatId = requireChatId(args);
         await api("setMessageReaction", {
-          chat_id: args.chat_id || DEFAULT_CHAT_ID || undefined,
+          chat_id: chatId,
           message_id: args.message_id,
           reaction: [{ type: "emoji", emoji: args.emoji }],
           is_big: false,

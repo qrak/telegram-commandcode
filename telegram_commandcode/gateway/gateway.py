@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from telegram import Update
@@ -67,11 +68,20 @@ class BotGateway:
     # ── Bot identity ───────────────────────────────────────────────────
 
     async def ensure_bot_identity(self, bot) -> None:
-        """Lazy-load bot username and id from getMe()."""
-        if self.bot_username is None and bot:
+        """Lazy-load bot username and id from getMe().
+
+        A transient Telegram failure here must not drop the update: group
+        mention detection degrades to "not mentioned" until the next attempt.
+        """
+        if self.bot_username is not None or not bot:
+            return
+        try:
             me = await bot.get_me()
-            self.bot_username = me.username
-            self.bot_id = me.id
+        except Exception as exc:
+            logger.warning("getMe() failed, bot identity unknown: %s", exc)
+            return
+        self.bot_username = me.username
+        self.bot_id = me.id
 
     # ── Rate limiting ──────────────────────────────────────────────────
 
@@ -79,8 +89,8 @@ class BotGateway:
         """Return True if the user should be allowed past rate limiting."""
         if user_id is None:
             return True
-        now = asyncio.get_event_loop().time()
-        last = self.rate_limits.get(user_id, 0)
+        now = time.monotonic()
+        last = self.rate_limits.get(user_id, 0.0)
         if now - last < self.RATE_LIMIT_WINDOW:
             return False
         self.rate_limits[user_id] = now

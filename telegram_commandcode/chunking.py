@@ -18,7 +18,7 @@ import logging
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -248,49 +248,77 @@ def maybe_file_fallback(text: str, threshold: int = FILE_FALLBACK_THRESHOLD) -> 
 
 # ── File path detection (MEDIA: prefix + bare absolute paths) ──────────────
 
-MEDIA_RE = re.compile(r"MEDIA:(/[^\s\"')\]>]{3,})")
+# MEDIA:/posix/path, MEDIA:C:\win\path, and quoted variants with spaces.
+MEDIA_RE = re.compile(
+    r"""MEDIA:(?:"([^"\n]{3,})"|'([^'\n]{3,})'|(\S{3,}))"""
+)
+
+# Bare absolute paths: POSIX roots and Windows drive letters.
 BARE_PATH_RE = re.compile(
-    r"((?:/home|/tmp|/var|/usr|/etc|/opt|/mnt|/media|/run|/srv)"
-    r"/[^\s\"')\]>]{3,})"
+    r"""(
+        (?:/home|/tmp|/var|/usr|/etc|/opt|/mnt|/media|/run|/srv)/[^\s"')\]>]{3,}
+        |
+        [A-Za-z]:\\[^\s"')\]>]{3,}
+    )""",
+    re.VERBOSE,
 )
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
 
+_TRAILING_PUNCT = ".,;:!?)"
 
-def find_file_paths(text: str) -> list[dict]:
-    """Scan text for file paths to auto-attach.
 
-    Checks both ``MEDIA:`` prefix and bare absolute paths.
-    Returns list of ``{path, type}`` where type is ``'photo'`` or ``'document'``.
+def _candidate_paths(text: str) -> list[str]:
+    """Return every path-looking string, in priority order, without duplicates.
+
+    ``MEDIA:`` markers win over bare paths. Existence is *not* checked here so
+    this can be tested without touching the filesystem.
     """
-    seen = set()
-    results = []
+    seen: set[str] = set()
+    candidates: list[str] = []
+    media_spans: list[tuple[int, int]] = []
+
+    def add(raw: str) -> None:
+        path = raw.strip().rstrip(_TRAILING_PUNCT)
+        if path and path not in seen:
+            seen.add(path)
+            candidates.append(path)
 
     for match in MEDIA_RE.finditer(text):
-        path_str = match.group(1).rstrip(".,;:!?)")
-        if path_str in seen:
-            continue
-        seen.add(path_str)
-        p = Path(path_str)
-        if p.exists():
-            ext = p.suffix.lower()
-            results.append({
-                "path": str(p),
-                "type": "photo" if ext in IMAGE_EXTENSIONS else "document",
-            })
+        add(next(group for group in match.groups() if group))
+        media_spans.append(match.span())
 
-    # Fallback: bare paths (only if not already found via MEDIA:)
     for match in BARE_PATH_RE.finditer(text):
-        path_str = match.group(1).rstrip(".,;:!?)")
-        if path_str in seen:
+        start, end = match.span(1)
+        # A path inside a quoted MEDIA:"..." marker must not be matched again
+        # (the bare regex stops at the first space).
+        if any(start >= a and end <= b for a, b in media_spans):
             continue
-        seen.add(path_str)
+        add(match.group(1))
+
+    return candidates
+
+
+def find_file_paths(text: str) -> list[dict]:
+    """Scan text for existing files to auto-attach.
+
+    Checks both ``MEDIA:`` prefix and bare absolute paths (POSIX and Windows).
+    Returns list of ``{path, type}`` where type is ``'photo'`` or ``'document'``.
+    """
+    results = []
+
+    for path_str in _candidate_paths(text):
         p = Path(path_str)
-        if p.exists():
-            ext = p.suffix.lower()
-            results.append({
-                "path": str(p),
-                "type": "photo" if ext in IMAGE_EXTENSIONS else "document",
-            })
+        try:
+            exists = p.is_file()
+        except OSError:
+            exists = False
+        if not exists:
+            continue
+        ext = p.suffix.lower()
+        results.append({
+            "path": str(p),
+            "type": "photo" if ext in IMAGE_EXTENSIONS else "document",
+        })
 
     return results[:5]  # max 5 auto-attachments

@@ -9,7 +9,8 @@ Lane A (toggle/read): /plan, /goal, /steer, /queue
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+import logging
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -21,7 +22,9 @@ from telegram_commandcode.executor import ExecOptions, run_cmd
 from .base import BaseCommandHandler
 
 if TYPE_CHECKING:
-    from telegram.ext import ContextTypes
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 class PromptCommands(BaseCommandHandler):
@@ -57,7 +60,7 @@ class PromptCommands(BaseCommandHandler):
 
         chat_id = str(update.effective_chat.id)
         state = self.get_state(chat_id)
-        bg_id = f"bg_{int(datetime.now().timestamp())}"
+        bg_id = f"bg_{uuid.uuid4().hex[:8]}"
 
         await self.send_md(
             update,
@@ -65,26 +68,31 @@ class PromptCommands(BaseCommandHandler):
         )
 
         async def _bg_task() -> None:
-            opts = ExecOptions(
-                model=state.model,
-                plan_mode=state.plan_mode,
-                continue_session=state.active,
-                add_dirs=list(state.add_dirs),
-                timeout=1800,
-            )
-            result = await run_cmd(args, opts)
-            out = result.output[:3800]
-            status = "✅" if result.success else "⚠️"
             try:
+                opts = ExecOptions(
+                    model=state.model,
+                    plan_mode=state.plan_mode,
+                    continue_session=state.active,
+                    add_dirs=list(state.add_dirs),
+                    timeout=1800,
+                )
+                result = await run_cmd(args, opts)
+                out = result.output[:3800]
+                status = "✅" if result.success else "⚠️"
                 await self.send_md(
                     update,
                     f"{status} *Background task complete* \\({bg_id}\\)\n\n{escape_md2(out)}",
                 )
-            except Exception as exc:
-                import logging
-                logging.getLogger(__name__).error(
-                    "Failed to send bg task result: %s", exc,
-                )
+            except Exception:
+                # A background task must never die silently.
+                logger.exception("Background task %s failed", bg_id)
+                try:
+                    await self.send_md(
+                        update,
+                        f"❌ Background task `{bg_id}` failed\\. Check the bot logs\\.",
+                    )
+                except Exception:
+                    logger.debug("Could not report background failure", exc_info=True)
 
         asyncio.create_task(_bg_task())
         return None
